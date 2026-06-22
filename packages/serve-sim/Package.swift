@@ -48,6 +48,7 @@ let package = Package(
             sources: [
                 "SimNative/sim-module.swift",
                 "SimNative/sim-capture.swift",
+                "SimStreamHelper/WebRTCPublisher.swift",
                 "SimStreamHelper/HIDInjector.swift",
                 "SimStreamHelper/FrameCapture.swift",
                 "SimStreamHelper/VideoEncoder.swift",
@@ -57,7 +58,16 @@ let package = Package(
                 "SimStreamHelper/SimFrameworks.swift",
                 "SimStreamHelper/Xcode.swift",
             ],
+            swiftSettings: [
+                .unsafeFlags(["-F", "bin"]),
+            ],
             linkerSettings: [
+                .unsafeFlags([
+                    "-F", "bin",
+                    "-framework", "LiveKitWebRTC",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@loader_path/../bin",
+                ]),
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("IOSurface"),

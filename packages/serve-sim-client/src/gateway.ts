@@ -170,7 +170,7 @@ export interface GatewayShell {
  *
  * @example
  * ```ts
- * import Gateway from "serve-sim-client";
+ * import Gateway from "serve-sim-client-sjchmiela";
  *
  * const $ = await Gateway.connect({ token: "dev" });
  *

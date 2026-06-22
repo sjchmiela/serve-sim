@@ -45,6 +45,10 @@ fi
 
 OUT="$OUT_DIR/${PRODUCT}.node"
 cp "$DYLIB" "$OUT"
+install_name_tool \
+  -change "@rpath/LiveKitWebRTC.framework/LiveKitWebRTC" \
+  "@loader_path/../../bin/LiveKitWebRTC.framework/Versions/A/LiveKitWebRTC" \
+  "$OUT"
 codesign -s - -f "$OUT" 2>/dev/null || true
 
 echo "Built: $OUT"
