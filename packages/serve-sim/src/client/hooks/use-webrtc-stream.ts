@@ -104,6 +104,7 @@ export function useWebRtcStream({
           body: JSON.stringify({
             type: local.type,
             sdp: local.sdp,
+            codec,
             iceServers: servers,
           }),
         });
