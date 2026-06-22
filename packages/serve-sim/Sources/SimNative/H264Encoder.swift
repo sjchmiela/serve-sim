@@ -160,7 +160,7 @@ final class H264Encoder {
         let props: [(CFString, Any)] = [
             (kVTCompressionPropertyKey_RealTime, kCFBooleanTrue!),
             (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel),
-            (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse!),
+            (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanTrue!),
             (kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitrate)),
             (kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: fps)),
             // 5s keyframe interval: IDRs are far larger than P-frames, so
