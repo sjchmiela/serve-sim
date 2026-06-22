@@ -26,6 +26,7 @@ export interface ServeSimDeviceState {
   codec?: "auto" | "mjpeg" | "h264";
   streamFps?: number;
   streamQuality?: number;
+  streamMaxDimension?: number;
   h264Bitrate?: number;
   h264MaxFps?: number;
   webrtcCodec?: "vp8" | "h264";
@@ -43,7 +44,18 @@ export function inProcessServeSimState(
   port: number,
   base = "/",
   host = "127.0.0.1",
-  stream?: Pick<ServeSimDeviceState, "transport" | "codec" | "webrtcCodec" | "webrtcIceServers">,
+  stream?: Pick<
+    ServeSimDeviceState,
+    | "transport"
+    | "codec"
+    | "streamFps"
+    | "streamQuality"
+    | "streamMaxDimension"
+    | "h264Bitrate"
+    | "h264MaxFps"
+    | "webrtcCodec"
+    | "webrtcIceServers"
+  >,
 ): ServeSimDeviceState {
   const h = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
   // Normalize to a leading-slash, no-trailing-slash prefix so a base without a

@@ -51,6 +51,7 @@ interface NativeAddon {
     mjpegQuality: number,
     h264Fps: number,
     h264Bitrate: number,
+    streamMaxDimension: number,
   ) => SimCaptureHandle;
   axDescribe(udid: string): Promise<string>;
   axFrontmost(udid: string): Promise<string>;
@@ -79,6 +80,7 @@ export interface NativeFrame {
 export interface NativeCaptureOptions {
   streamFps?: number;
   streamQuality?: number;
+  streamMaxDimension?: number;
   h264MaxFps?: number;
   h264Bitrate?: number;
 }
@@ -218,7 +220,7 @@ export class NativeCapture {
         isDescription: (flags & FLAG_DESCRIPTION) !== 0,
         isKeyframe: (flags & FLAG_KEYFRAME) !== 0,
       });
-    }, onWebRTCInput, options.streamFps ?? 60, options.streamQuality ?? 0.7, options.h264MaxFps ?? 60, options.h264Bitrate ?? 6_000_000);
+    }, onWebRTCInput, options.streamFps ?? 60, options.streamQuality ?? 0.7, options.h264MaxFps ?? 60, options.h264Bitrate ?? 6_000_000, options.streamMaxDimension ?? 0);
   }
 
   /** Begin capturing. Throws if the device isn't booted. */

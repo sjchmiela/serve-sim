@@ -48,7 +48,15 @@ type ServerState = ServeSimDeviceState;
 
 type StreamRuntimeOptions = Pick<
   ServeSimDeviceState,
-  "transport" | "codec" | "streamFps" | "streamQuality" | "h264Bitrate" | "h264MaxFps" | "webrtcCodec" | "webrtcIceServers"
+  | "transport"
+  | "codec"
+  | "streamFps"
+  | "streamQuality"
+  | "streamMaxDimension"
+  | "h264Bitrate"
+  | "h264MaxFps"
+  | "webrtcCodec"
+  | "webrtcIceServers"
 >;
 type WebRTCIceServer = NonNullable<ServeSimDeviceState["webrtcIceServers"]>[number];
 
@@ -1650,6 +1658,7 @@ async function serve(
     codec: options.stream?.codec,
     streamFps: options.stream?.streamFps,
     streamQuality: options.stream?.streamQuality,
+    streamMaxDimension: options.stream?.streamMaxDimension,
     h264Bitrate: options.stream?.h264Bitrate,
     h264MaxFps: options.stream?.h264MaxFps,
     transport: options.stream?.transport,
@@ -1787,7 +1796,7 @@ program
   .option("--turn-credential <credential>", "TURN credential")
   .option("--stream-fps <fps>", "MJPEG stream frame rate", (value) => parsePositiveIntOption(value, "--stream-fps"))
   .option("--stream-quality <quality>", "MJPEG JPEG quality, from 0 to 1", parseQualityOption)
-  .option("--stream-max-dimension <px>", "Accepted for serve-sim-szdziedzic compatibility")
+  .option("--stream-max-dimension <px>", "Maximum encoded stream dimension", (value) => parsePositiveIntOption(value, "--stream-max-dimension"))
   .option("--h264-bitrate <bps>", "H.264 target bitrate", (value) => parsePositiveIntOption(value, "--h264-bitrate"))
   .option("--h264-max-fps <fps>", "H.264 max frame rate", (value) => parsePositiveIntOption(value, "--h264-max-fps"))
   .option("-l, --list [device]", "List running streams")
@@ -1851,6 +1860,7 @@ Examples:
       codec,
       streamFps: opts.streamFps,
       streamQuality: opts.streamQuality,
+      streamMaxDimension: opts.streamMaxDimension,
       h264Bitrate: opts.h264Bitrate,
       h264MaxFps: opts.h264MaxFps,
       webrtcCodec: transport === "webrtc" ? opts.webrtcCodec : undefined,

@@ -657,7 +657,15 @@ export async function startDeviceInProcess(
   base: string,
   stream?: Pick<
     ServeSimState,
-    "transport" | "codec" | "streamFps" | "streamQuality" | "h264Bitrate" | "h264MaxFps" | "webrtcCodec" | "webrtcIceServers"
+    | "transport"
+    | "codec"
+    | "streamFps"
+    | "streamQuality"
+    | "streamMaxDimension"
+    | "h264Bitrate"
+    | "h264MaxFps"
+    | "webrtcCodec"
+    | "webrtcIceServers"
   >,
 ): Promise<string | null> {
   // `simctl boot` errors when already booted — ignore and let bootstatus confirm.
@@ -1138,6 +1146,7 @@ export interface SimMiddlewareOptions {
   codec?: "auto" | "mjpeg" | "h264";
   streamFps?: number;
   streamQuality?: number;
+  streamMaxDimension?: number;
   h264Bitrate?: number;
   h264MaxFps?: number;
   transport?: "http" | "webrtc";
@@ -1224,6 +1233,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       if (serveHelperInProcess(req, res, device, helperTarget.upstreamPath, {
         streamFps: options?.streamFps,
         streamQuality: options?.streamQuality,
+        streamMaxDimension: options?.streamMaxDimension,
         h264Bitrate: options?.h264Bitrate,
         h264MaxFps: options?.h264MaxFps,
       })) return;
@@ -1455,6 +1465,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           codec: options?.codec,
           streamFps: options?.streamFps,
           streamQuality: options?.streamQuality,
+          streamMaxDimension: options?.streamMaxDimension,
           h264Bitrate: options?.h264Bitrate,
           h264MaxFps: options?.h264MaxFps,
           webrtcCodec: options?.webrtcCodec,
@@ -1913,6 +1924,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       if (attachHidInProcess(req, socket, head, device, {
         streamFps: options?.streamFps,
         streamQuality: options?.streamQuality,
+        streamMaxDimension: options?.streamMaxDimension,
         h264Bitrate: options?.h264Bitrate,
         h264MaxFps: options?.h264MaxFps,
       })) return;
