@@ -29,7 +29,7 @@ export interface ServeSimDeviceState {
   streamMaxDimension?: number;
   h264Bitrate?: number;
   h264MaxFps?: number;
-  webrtcCodec?: "vp8" | "h264";
+  webrtcCodec?: "vp8" | "vp9" | "h264";
   webrtcIceServers?: Array<{ urls: string[]; username?: string; credential?: string }>;
 }
 

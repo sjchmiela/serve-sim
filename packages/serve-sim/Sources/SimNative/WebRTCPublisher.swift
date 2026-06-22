@@ -160,7 +160,15 @@ final class WebRTCPublisher {
     }
 
     private func applyVideoCodecPreference(_ codec: String?, to transceiver: LKRTCRtpTransceiver) {
-        let preferredName = codec == "vp8" ? "VP8" : "H264"
+        let preferredName: String
+        switch codec?.lowercased() {
+        case "vp8":
+            preferredName = "VP8"
+        case "vp9":
+            preferredName = "VP9"
+        default:
+            preferredName = "H264"
+        }
         let capabilities = factory.rtpSenderCapabilities(forKind: "video")
         let preferredCodecs = capabilities.codecs.filter {
             $0.name.caseInsensitiveCompare(preferredName) == .orderedSame ||

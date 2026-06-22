@@ -6,7 +6,7 @@ type IceServer = {
   credential?: string;
 };
 
-type WebRtcCodec = "vp8" | "h264";
+type WebRtcCodec = "vp8" | "vp9" | "h264";
 
 export type DataChannelTarget = {
   readyState: number;
@@ -51,7 +51,11 @@ export function useWebRtcStream({
     dataChannelRef.current = dc;
     const videoTransceiver = pc.addTransceiver("video", { direction: "recvonly" });
     const videoCapabilities = RTCRtpReceiver.getCapabilities("video");
-    const preferredMimeType = codec === "h264" ? "video/H264" : "video/VP8";
+    const preferredMimeType = codec === "h264"
+      ? "video/H264"
+      : codec === "vp9"
+        ? "video/VP9"
+        : "video/VP8";
     if (videoCapabilities?.codecs.length && "setCodecPreferences" in videoTransceiver) {
       videoTransceiver.setCodecPreferences([
         ...videoCapabilities.codecs.filter((candidate) => candidate.mimeType === preferredMimeType),
