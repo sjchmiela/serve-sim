@@ -160,6 +160,22 @@ private func u32(_ v: Int) -> UInt32 {
         engine.requestKeyframe()
     }
 
+    @NodeMethod func updateStreamSettings(
+        _ mjpegFps: Int,
+        _ mjpegQuality: Double,
+        _ h264Fps: Int,
+        _ h264Bitrate: Int,
+        _ maxDimension: Int
+    ) {
+        engine.updateSettings(
+            mjpegFps: mjpegFps,
+            mjpegQuality: mjpegQuality,
+            h264Fps: h264Fps,
+            h264Bitrate: h264Bitrate,
+            maxDimension: maxDimension
+        )
+    }
+
     @NodeMethod func handleWebRTCOffer(_ offerJson: String) throws -> String {
         try engine.handleWebRTCOffer(offerJson)
     }

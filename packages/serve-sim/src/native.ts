@@ -36,6 +36,13 @@ interface SimCaptureHandle {
   start(): void;
   setAvccActive(active: boolean): void;
   requestKeyframe(): void;
+  updateStreamSettings(
+    mjpegFps: number,
+    mjpegQuality: number,
+    h264Fps: number,
+    h264Bitrate: number,
+    streamMaxDimension: number,
+  ): void;
   handleWebRTCOffer(offerJson: string): string;
   screenSize(): { width: number; height: number };
   stop(): void;
@@ -236,6 +243,16 @@ export class NativeCapture {
   /** Force the next H.264 frame to a keyframe (e.g. when a new AVCC viewer joins). */
   requestKeyframe(): void {
     this.handle.requestKeyframe();
+  }
+
+  updateStreamSettings(options: NativeCaptureOptions): void {
+    this.handle.updateStreamSettings(
+      options.streamFps ?? 60,
+      options.streamQuality ?? 0.7,
+      options.h264MaxFps ?? 60,
+      options.h264Bitrate ?? 6_000_000,
+      options.streamMaxDimension ?? 0,
+    );
   }
 
   handleWebRTCOffer(offer: unknown): unknown {

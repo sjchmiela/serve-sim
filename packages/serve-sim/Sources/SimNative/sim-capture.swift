@@ -35,7 +35,7 @@ final class CaptureEngine {
     private let webRTCPublisher = WebRTCPublisher()
 
     private let frameCapture = FrameCapture()
-    private let videoEncoder: VideoEncoder
+    private var videoEncoder: VideoEncoder
     private let h264Encoder: H264Encoder
     private let ciContext = CIContext(options: [.workingColorSpace: NSNull()])
     private let encodeQueue = DispatchQueue(label: "napi.encode", qos: .userInteractive)
@@ -62,9 +62,9 @@ final class CaptureEngine {
     private var avccNativeEmitCount: Int64 = 0
     private var lastMjpegReservedAtNs: UInt64 = 0
     private var lastH264ReservedAtNs: UInt64 = 0
-    private let mjpegMinFrameIntervalNs: UInt64
-    private let h264MinFrameIntervalNs: UInt64
-    private let maxDimension: Int
+    private var mjpegMinFrameIntervalNs: UInt64
+    private var h264MinFrameIntervalNs: UInt64
+    private var maxDimension: Int
     private var started = false
     private var stopped = false
 
@@ -353,6 +353,35 @@ final class CaptureEngine {
             self?.forceKeyframe = true
             streamLog("[stream:avcc] keyframe requested")
         }
+    }
+
+    func updateSettings(mjpegFps: Int, mjpegQuality: Double, h264Fps: Int, h264Bitrate: Int, maxDimension: Int) {
+        let normalizedMjpegFps = max(1, mjpegFps)
+        let normalizedQuality = CGFloat(min(max(mjpegQuality, 0.0), 1.0))
+        let normalizedH264Fps = max(1, h264Fps)
+        let normalizedBitrate = max(1, h264Bitrate)
+        let normalizedMaxDimension = max(0, maxDimension)
+
+        encodeQueue.sync {
+            self.mjpegMinFrameIntervalNs = UInt64(1_000_000_000 / normalizedMjpegFps)
+            self.maxDimension = normalizedMaxDimension
+            self.videoEncoder.stop()
+            self.videoEncoder = VideoEncoder(quality: normalizedQuality)
+            self.encoderReady = false
+            self.encoding = false
+            self.lastMjpegReservedAtNs = 0
+        }
+        h264Queue.sync {
+            self.h264MinFrameIntervalNs = UInt64(1_000_000_000 / normalizedH264Fps)
+            self.h264Encoder.update(fps: normalizedH264Fps, bitrate: normalizedBitrate)
+            self.forceKeyframe = true
+            self.h264Encoding = false
+            self.lastH264ReservedAtNs = 0
+        }
+        streamLog(
+            "[stream] settings updated mjpegFps=\(normalizedMjpegFps) mjpegQuality=\(normalizedQuality) " +
+            "h264Fps=\(normalizedH264Fps) h264Bitrate=\(normalizedBitrate) maxDimension=\(normalizedMaxDimension)"
+        )
     }
 
     func handleWebRTCOffer(_ offerJson: String) throws -> String {
