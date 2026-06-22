@@ -36,6 +36,7 @@ final class H264Encoder {
     private var encodedCount: Int64 = 0
     private var lowLatencyEnabled = true
     private var forceKeyframeAfterReset = false
+    private var retiredSessions: [VTCompressionSession] = []
 
     init(fps: Int = 60, bitrate: Int = 6_000_000) {
         self.fps = Int32(fps)
@@ -44,6 +45,7 @@ final class H264Encoder {
 
     deinit {
         if let session { VTCompressionSessionInvalidate(session) }
+        for session in retiredSessions { VTCompressionSessionInvalidate(session) }
     }
 
     /// Submit a frame. Returns immediately; `onEncoded` fires on VT's queue.
@@ -137,6 +139,8 @@ final class H264Encoder {
             VTCompressionSessionInvalidate(session)
             self.session = nil
         }
+        for session in retiredSessions { VTCompressionSessionInvalidate(session) }
+        retiredSessions.removeAll()
         pool = nil
     }
 
@@ -265,10 +269,18 @@ final class H264Encoder {
         lock.lock()
         defer { lock.unlock() }
         guard lowLatencyEnabled else { return }
-        streamLog("[stream:h264] low-latency encoder failed (\(reason)); rebuilding default VT session")
+        streamLog("[stream:h264] low-latency encoder failed (\(reason)); default VT session will be used")
         lowLatencyEnabled = false
         forceKeyframeAfterReset = true
-        rebuildSession()
+        if let session {
+            retiredSessions.append(session)
+            self.session = nil
+        }
+        pool = nil
+        stateQueue.sync {
+            emittedDescription = false
+            encodedCount = 0
+        }
     }
 
     private func nextEncodedCount() -> Int64 {
