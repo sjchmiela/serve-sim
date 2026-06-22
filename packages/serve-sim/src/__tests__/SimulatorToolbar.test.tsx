@@ -41,7 +41,7 @@ describe("SimulatorToolbar.Title", () => {
 
 describe("homeButtonCommand", () => {
   // Xcode 26+ silently drops the HID home press, so phones/pads must relaunch
-  // SpringBoard instead of going through `serve-sim button home`.
+  // SpringBoard instead of going through `serve-sim-sjchmiela button home`.
   test("relaunches SpringBoard for a known iphone udid", () => {
     expect(homeButtonCommand("iphone", "BOOTED-UDID")).toBe(
       "xcrun simctl launch BOOTED-UDID com.apple.springboard",
@@ -59,7 +59,7 @@ describe("homeButtonCommand", () => {
   });
 
   test("falls back to the HID button command when no udid is known", () => {
-    expect(homeButtonCommand("iphone", null)).toBe("serve-sim button home");
+    expect(homeButtonCommand("iphone", null)).toBe("serve-sim-sjchmiela button home");
   });
 });
 

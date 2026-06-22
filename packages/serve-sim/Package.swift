@@ -39,11 +39,26 @@ let package = Package(
             exclude: [
                 "build.sh",
             ],
+            swiftSettings: [
+                .unsafeFlags(["-F", "bin"]),
+            ],
             linkerSettings: [
                 .unsafeFlags([
+                    "-F", "bin",
+                    "-framework", "LiveKitWebRTC",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "@loader_path/../bin",
                     "-Xlinker", "-undefined",
                     "-Xlinker", "dynamic_lookup",
-                ])
+                ]),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("IOSurface"),
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("VideoToolbox"),
+                .linkedFramework("ImageIO"),
+                .linkedFramework("AppKit"),
+                .linkedFramework("Accelerate"),
             ]
         ),
     ],

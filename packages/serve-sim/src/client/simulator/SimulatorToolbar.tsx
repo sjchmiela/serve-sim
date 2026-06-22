@@ -42,7 +42,7 @@ function useToolbar(component: string): ToolbarContextValue {
 
 export interface SimulatorToolbarProps extends HTMLAttributes<HTMLDivElement> {
   exec: ExecFn;
-  /** Optional direct rotate handler. Defaults to shelling out to `serve-sim rotate`. */
+  /** Optional direct rotate handler. Defaults to shelling out to `serve-sim-sjchmiela rotate`. */
   onRotate?: RotateFn;
   /** Current requested orientation, when known. Keeps the built-in rotate button in sync. */
   orientation?: SimulatorOrientation | null;
@@ -366,7 +366,7 @@ const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function
 // to the watch face.
 // Pick the host command that returns a device to its home screen.
 //
-// The HID home-button press (`serve-sim button home`) is silently dropped by
+// The HID home-button press (`serve-sim-sjchmiela button home`) is silently dropped by
 // Xcode 26+, which delivers the Indigo event but never routes it to
 // SpringBoard. Relaunching SpringBoard foregrounds the home screen reliably on
 // every Xcode version and is functionally identical to a single home press, so
@@ -378,7 +378,7 @@ export function homeButtonCommand(
 ): string {
   if (deviceType === "watch") return watchHomeAppleScript();
   if (deviceUdid) return `xcrun simctl launch ${deviceUdid} com.apple.springboard`;
-  return "serve-sim button home";
+  return "serve-sim-sjchmiela button home";
 }
 
 function watchHomeAppleScript(): string {
@@ -501,7 +501,7 @@ const RotateButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(function 
         if (ctx.onRotate) {
           void ctx.onRotate(next);
         } else {
-          void ctx.exec(`serve-sim rotate ${next} -d ${ctx.deviceUdid}`);
+          void ctx.exec(`serve-sim-sjchmiela rotate ${next} -d ${ctx.deviceUdid}`);
         }
       }}
       {...rest}

@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 
-/** Matches the JSON output of `serve-sim --detach` and `serve-sim --list`. */
+/** Matches the JSON output of `serve-sim-sjchmiela --detach` and `serve-sim --list`. */
 export interface SimStreamInfo {
   url: string;
   streamUrl: string;
@@ -45,7 +45,7 @@ export function useSimStream({ exec, device: deviceProp }: UseSimStreamOptions):
   }, []);
 
   // Auto-connect/switch when deviceProp changes.
-  // `serve-sim --detach` handles booting, tearing down a previous server
+  // `serve-sim-sjchmiela --detach` handles booting, tearing down a previous server
   // for a different device, and returning early if already streaming the
   // requested device — so we just call it with the new UDID.
   const prevDeviceProp = useRef(deviceProp);
@@ -66,14 +66,14 @@ export function useSimStream({ exec, device: deviceProp }: UseSimStreamOptions):
       try {
         if (!deviceProp) {
           // No device selected — just disconnect
-          await exec("serve-sim --kill");
+          await exec("serve-sim-sjchmiela --kill");
           if (mountedRef.current) setInfo(null);
           return;
         }
-        const result = await exec(`serve-sim --detach ${deviceProp}`);
+        const result = await exec(`serve-sim-sjchmiela --detach ${deviceProp}`);
         if (cancelled) return;
         if (result.exitCode !== 0) {
-          throw new Error(result.stderr || `serve-sim --detach failed (exit ${result.exitCode})`);
+          throw new Error(result.stderr || `serve-sim-sjchmiela --detach failed (exit ${result.exitCode})`);
         }
         const parsed = JSON.parse(result.stdout.trim()) as SimStreamInfo;
         if (mountedRef.current) setInfo(parsed);
@@ -96,14 +96,14 @@ export function useSimStream({ exec, device: deviceProp }: UseSimStreamOptions):
     console.log(`[serve-sim] connect: starting`);
     try {
       const target = device ?? deviceProp ?? undefined;
-      let cmd = "serve-sim --detach";
+      let cmd = "serve-sim-sjchmiela --detach";
       if (target) cmd += ` ${target}`;
       if (port) cmd += ` --port ${port}`;
 
       const result = await exec(cmd);
       console.log(`[serve-sim] connect: exec returned (+${(performance.now() - t0).toFixed(0)}ms, exit ${result.exitCode})`);
       if (result.exitCode !== 0) {
-        throw new Error(result.stderr || `serve-sim --detach failed (exit ${result.exitCode})`);
+        throw new Error(result.stderr || `serve-sim-sjchmiela --detach failed (exit ${result.exitCode})`);
       }
       const parsed = JSON.parse(result.stdout.trim()) as SimStreamInfo;
       if (mountedRef.current) setInfo(parsed);
@@ -122,7 +122,7 @@ export function useSimStream({ exec, device: deviceProp }: UseSimStreamOptions):
     setLoading(true);
     setError(null);
     try {
-      await exec("serve-sim --kill");
+      await exec("serve-sim-sjchmiela --kill");
       if (mountedRef.current) setInfo(null);
     } catch (err) {
       if (mountedRef.current) {
@@ -135,7 +135,7 @@ export function useSimStream({ exec, device: deviceProp }: UseSimStreamOptions):
 
   const sendButton = useCallback(async (button: string) => {
     try {
-      await exec(`serve-sim button ${button}`);
+      await exec(`serve-sim-sjchmiela button ${button}`);
     } catch {
       // best-effort
     }
