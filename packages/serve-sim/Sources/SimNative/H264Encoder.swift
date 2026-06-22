@@ -33,6 +33,9 @@ final class H264Encoder {
     private let stateQueue = DispatchQueue(label: "H264Encoder.state")
     private var emittedDescription = false
     private var frameCount: Int64 = 0
+    private var encodedCount: Int64 = 0
+    private var lowLatencyEnabled = true
+    private var forceKeyframeAfterReset = false
 
     init(fps: Int = 60, bitrate: Int = 6_000_000) {
         self.fps = Int32(fps)
@@ -53,17 +56,33 @@ final class H264Encoder {
             height = h
             rebuildSession()
         }
-        guard let session, let copy = copyBuffer(source) else {
+        guard let session else {
+            streamLog("[stream:h264] drop frame: VTCompressionSession unavailable size=\(w)x\(h)")
+            lock.unlock()
+            completion?()
+            return
+        }
+        guard let copy = copyBuffer(source) else {
+            streamLog("[stream:h264] drop frame: failed to copy pixel buffer size=\(w)x\(h)")
             lock.unlock()
             completion?()
             return
         }
 
         frameCount += 1
+        let submittedFrame = frameCount
         let pts = CMTime(value: frameCount, timescale: fps)
-        let frameProps: NSDictionary? = forceKeyframe
+        let effectiveForceKeyframe = forceKeyframe || forceKeyframeAfterReset
+        forceKeyframeAfterReset = false
+        let frameProps: NSDictionary? = effectiveForceKeyframe
             ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue!] as NSDictionary
             : nil
+        if streamShouldLog(submittedFrame) || effectiveForceKeyframe {
+            streamLog(
+                "[stream:h264] submit frame #\(submittedFrame) size=\(w)x\(h) " +
+                "forceKeyframe=\(effectiveForceKeyframe)"
+            )
+        }
         lock.unlock()
 
         let status = VTCompressionSessionEncodeFrame(
@@ -75,12 +94,40 @@ final class H264Encoder {
             infoFlagsOut: nil
         ) { [weak self] status, _, sampleBuffer in
             defer { completion?() }
-            guard let self, status == noErr, let sb = sampleBuffer else { return }
-            if let encoded = self.extract(from: sb) { self.onEncoded?(encoded) }
+            guard let self else { return }
+            guard status == noErr else {
+                streamLog("[stream:h264] encode callback failed frame #\(submittedFrame) status=\(status)")
+                self.fallbackFromLowLatency(reason: "callback status=\(status)")
+                return
+            }
+            guard let sb = sampleBuffer else {
+                streamLog("[stream:h264] encode callback missing sample frame #\(submittedFrame)")
+                self.fallbackFromLowLatency(reason: "callback missing sample")
+                return
+            }
+            guard let encoded = self.extract(from: sb) else {
+                streamLog("[stream:h264] encode callback produced unextractable sample frame #\(submittedFrame)")
+                return
+            }
+            let encodedFrame = self.nextEncodedCount()
+            if streamShouldLog(encodedFrame) || encoded.description != nil || encoded.kind == .keyframe {
+                let kind = encoded.kind == .keyframe ? "keyframe" : "delta"
+                streamLog(
+                    "[stream:h264] encoded #\(encodedFrame) kind=\(kind) bytes=\(encoded.avcc.count) " +
+                    "descriptionBytes=\(encoded.description?.count ?? 0)"
+                )
+            }
+            self.onEncoded?(encoded)
         }
         if status != noErr {
+            streamLog("[stream:h264] VTCompressionSessionEncodeFrame failed frame #\(submittedFrame) status=\(status)")
+            fallbackFromLowLatency(reason: "submit status=\(status)")
             completion?()
         }
+    }
+
+    func handleEncodeTimeout() {
+        fallbackFromLowLatency(reason: "encode timeout")
     }
 
     func stop() {
@@ -150,12 +197,24 @@ final class H264Encoder {
                 compressionSessionOut: &sess
             )
         }
-        var status = create(spec: lowLatencySpec)
-        if status != noErr || sess == nil {
+        let preferredSpec: CFDictionary?
+        if lowLatencyEnabled {
+            preferredSpec = lowLatencySpec
+        } else {
+            preferredSpec = nil
+        }
+        var status = create(spec: preferredSpec)
+        if lowLatencyEnabled && (status != noErr || sess == nil) {
+            streamLog("[stream:h264] low-latency VT session create failed status=\(status); retrying default")
+            lowLatencyEnabled = false
+            forceKeyframeAfterReset = true
             sess = nil
             status = create(spec: nil)
         }
-        guard status == noErr, let sess else { return }
+        guard status == noErr, let sess else {
+            streamLog("[stream:h264] VT session create failed status=\(status) size=\(width)x\(height)")
+            return
+        }
 
         let props: [(CFString, Any)] = [
             (kVTCompressionPropertyKey_RealTime, kCFBooleanTrue!),
@@ -169,12 +228,19 @@ final class H264Encoder {
             (kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: fps * 5)),
         ]
         for (key, value) in props {
-            VTSessionSetProperty(sess, key: key, value: value as CFTypeRef)
+            let propStatus = VTSessionSetProperty(sess, key: key, value: value as CFTypeRef)
+            if propStatus != noErr {
+                streamLog("[stream:h264] VTSessionSetProperty failed key=\(key) status=\(propStatus)")
+            }
         }
-        VTCompressionSessionPrepareToEncodeFrames(sess)
+        let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(sess)
+        if prepareStatus != noErr {
+            streamLog("[stream:h264] VTCompressionSessionPrepareToEncodeFrames status=\(prepareStatus)")
+        }
         session = sess
         stateQueue.sync {
             emittedDescription = false
+            encodedCount = 0
         }
 
         // Pool feeding the deep-copy; BGRA matches the framebuffer surface.
@@ -185,8 +251,31 @@ final class H264Encoder {
             kCVPixelBufferIOSurfacePropertiesKey as String: [:],
         ]
         var newPool: CVPixelBufferPool?
-        CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attrs as CFDictionary, &newPool)
+        let poolStatus = CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attrs as CFDictionary, &newPool)
+        if poolStatus != kCVReturnSuccess || newPool == nil {
+            streamLog("[stream:h264] pixel buffer pool create failed status=\(poolStatus) size=\(width)x\(height)")
+        } else {
+            let mode = lowLatencyEnabled ? "low-latency" : "default"
+            streamLog("[stream:h264] VT session ready mode=\(mode) size=\(width)x\(height) fps=\(fps) bitrate=\(bitrate)")
+        }
         pool = newPool
+    }
+
+    private func fallbackFromLowLatency(reason: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard lowLatencyEnabled else { return }
+        streamLog("[stream:h264] low-latency encoder failed (\(reason)); rebuilding default VT session")
+        lowLatencyEnabled = false
+        forceKeyframeAfterReset = true
+        rebuildSession()
+    }
+
+    private func nextEncodedCount() -> Int64 {
+        stateQueue.sync {
+            encodedCount += 1
+            return encodedCount
+        }
     }
 
     private func extract(from sample: CMSampleBuffer) -> Encoded? {

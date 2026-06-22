@@ -47,6 +47,10 @@ interface NativeAddon {
     udid: string,
     onFrame: RawFrameCallback,
     onWebRTCInput: (data: Buffer) => void,
+    mjpegFps: number,
+    mjpegQuality: number,
+    h264Fps: number,
+    h264Bitrate: number,
   ) => SimCaptureHandle;
   axDescribe(udid: string): Promise<string>;
   axFrontmost(udid: string): Promise<string>;
@@ -70,6 +74,13 @@ export interface NativeFrame {
   isDescription: boolean;
   /** AVCC only: this chunk is an IDR keyframe (a decoder can start here). */
   isKeyframe: boolean;
+}
+
+export interface NativeCaptureOptions {
+  streamFps?: number;
+  streamQuality?: number;
+  h264MaxFps?: number;
+  h264Bitrate?: number;
 }
 
 export type TouchType = "begin" | "move" | "end";
@@ -196,6 +207,7 @@ export class NativeCapture {
     udid: string,
     onFrame: (frame: NativeFrame) => void,
     onWebRTCInput: (data: Buffer) => void = () => {},
+    options: NativeCaptureOptions = {},
   ) {
     this.handle = new (load().SimCapture)(udid, (codec, data, width, height, flags) => {
       onFrame({
@@ -206,7 +218,7 @@ export class NativeCapture {
         isDescription: (flags & FLAG_DESCRIPTION) !== 0,
         isKeyframe: (flags & FLAG_KEYFRAME) !== 0,
       });
-    }, onWebRTCInput);
+    }, onWebRTCInput, options.streamFps ?? 60, options.streamQuality ?? 0.7, options.h264MaxFps ?? 60, options.h264Bitrate ?? 6_000_000);
   }
 
   /** Begin capturing. Throws if the device isn't booted. */
