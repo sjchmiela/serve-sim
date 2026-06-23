@@ -58,11 +58,17 @@ final class CaptureEngine {
     private var h264BackpressureSkips: Int64 = 0
     private var mjpegThrottleSkips: Int64 = 0
     private var h264ThrottleSkips: Int64 = 0
+    private var webRTCReservedCount: Int64 = 0
+    private var webRTCThrottleSkips: Int64 = 0
+    private var webRTCCopyFailures: Int64 = 0
     private var avccNativeEmitCount: Int64 = 0
     private var lastMjpegReservedAtNs: UInt64 = 0
     private var lastH264ReservedAtNs: UInt64 = 0
+    private var lastWebRTCReservedAtNs: UInt64 = 0
     private var mjpegMinFrameIntervalNs: UInt64
     private var h264MinFrameIntervalNs: UInt64
+    private var webRTCMinFrameIntervalNs: UInt64
+    private var webRTCMaxFps: Int
     private var maxDimension: Int
     private var started = false
     private var stopped = false
@@ -82,8 +88,17 @@ final class CaptureEngine {
         h264Encoder = H264Encoder(fps: h264Fps, bitrate: h264Bitrate)
         mjpegMinFrameIntervalNs = UInt64(1_000_000_000 / mjpegFps)
         h264MinFrameIntervalNs = UInt64(1_000_000_000 / h264Fps)
+        webRTCMinFrameIntervalNs = UInt64(1_000_000_000 / h264Fps)
+        webRTCMaxFps = h264Fps
         maxDimension = max(0, options.maxDimension)
         webRTCPublisher.onInput = onWebRTCInput
+        webRTCPublisher.onActiveChanged = { [weak self] active in
+            guard let self else { return }
+            self.lastWebRTCReservedAtNs = 0
+            self.frameCapture.setIdleRefreshFps(active ? self.webRTCMaxFps : 5)
+            streamLog("[webrtc] active=\(active) idleRefreshFps=\(active ? self.webRTCMaxFps : 5)")
+        }
+        webRTCPublisher.updateSettings(maxFps: h264Fps, bitrate: h264Bitrate)
 
         h264Encoder.onEncoded = { [weak self] encoded in
             guard let self else { return }
@@ -144,7 +159,7 @@ final class CaptureEngine {
         }
 
         let h264Request = reserveH264EncodeIfNeeded()
-        let shouldSendWebRTC = webRTCPublisher.isActive
+        let shouldSendWebRTC = reserveWebRTCFrameIfNeeded()
         let shouldEncodeJpeg = encoderReady && !encoding && reserveMjpegEncodeIfNeeded()
         if !shouldEncodeJpeg && h264Request == nil && !shouldSendWebRTC { return }
 
@@ -152,6 +167,12 @@ final class CaptureEngine {
             if let h264Request {
                 streamLog("[stream:avcc] failed to copy capture frame for H.264 token=\(h264Request.token)")
                 finishH264Encode(token: h264Request.token, restoreKeyframe: h264Request.forceKeyframe)
+            }
+            if shouldSendWebRTC {
+                webRTCCopyFailures += 1
+                if streamShouldLog(webRTCCopyFailures) {
+                    streamLog("[webrtc] failed to copy capture frame for WebRTC")
+                }
             }
             return
         }
@@ -336,6 +357,24 @@ final class CaptureEngine {
         }
     }
 
+    private func reserveWebRTCFrameIfNeeded() -> Bool {
+        guard webRTCPublisher.isActive else { return false }
+        let now = DispatchTime.now().uptimeNanoseconds
+        if lastWebRTCReservedAtNs != 0 && now - lastWebRTCReservedAtNs < webRTCMinFrameIntervalNs {
+            webRTCThrottleSkips += 1
+            if streamShouldLog(webRTCThrottleSkips) {
+                streamLog("[webrtc] skip frame: fps throttle")
+            }
+            return false
+        }
+        lastWebRTCReservedAtNs = now
+        webRTCReservedCount += 1
+        if streamShouldLog(webRTCReservedCount) {
+            streamLog("[webrtc] reserved frame #\(webRTCReservedCount)")
+        }
+        return true
+    }
+
     private func finishH264Encode(token: UInt64, restoreKeyframe: Bool = false) {
         h264Queue.async { [weak self] in
             guard let self, self.h264FrameToken == token else { return }
@@ -391,10 +430,17 @@ final class CaptureEngine {
         }
         h264Queue.sync {
             self.h264MinFrameIntervalNs = UInt64(1_000_000_000 / normalizedH264Fps)
+            self.webRTCMinFrameIntervalNs = UInt64(1_000_000_000 / normalizedH264Fps)
+            self.webRTCMaxFps = normalizedH264Fps
             self.h264Encoder.update(fps: normalizedH264Fps, bitrate: normalizedBitrate)
+            self.webRTCPublisher.updateSettings(maxFps: normalizedH264Fps, bitrate: normalizedBitrate)
+            if self.webRTCPublisher.isActive {
+                self.frameCapture.setIdleRefreshFps(normalizedH264Fps)
+            }
             self.forceKeyframe = true
             self.h264Encoding = false
             self.lastH264ReservedAtNs = 0
+            self.lastWebRTCReservedAtNs = 0
         }
         streamLog(
             "[stream] settings updated mjpegFps=\(normalizedMjpegFps) mjpegQuality=\(normalizedQuality) " +
@@ -405,6 +451,7 @@ final class CaptureEngine {
     func handleWebRTCOffer(_ offerJson: String) throws -> String {
         let request = try JSONDecoder().decode(WebRTCOfferPayload.self, from: Data(offerJson.utf8))
         let answer = try webRTCPublisher.handleOffer(request)
+        lastWebRTCReservedAtNs = 0
         let data = try JSONEncoder().encode(answer)
         return String(decoding: data, as: UTF8.self)
     }

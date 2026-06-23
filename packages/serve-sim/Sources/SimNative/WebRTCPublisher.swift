@@ -23,6 +23,7 @@ struct WebRTCAnswerPayload: Codable {
 
 final class WebRTCPublisher {
     var onInput: ((Data) -> Void)?
+    var onActiveChanged: ((Bool) -> Void)?
 
     private let queue = DispatchQueue(label: "webrtc-publisher")
     private let factory: LKRTCPeerConnectionFactory
@@ -35,6 +36,8 @@ final class WebRTCPublisher {
     private var sentFrameCount: Int64 = 0
     private var lastFrameTimestampNs: Int64 = 0
     private var loggedInputFormat = false
+    private var maxFps = 30
+    private var targetBitrate = 6_000_000
     var isActive: Bool {
         queue.sync { session != nil }
     }
@@ -54,6 +57,27 @@ final class WebRTCPublisher {
             "[webrtc] Publisher ready (default codec factory + screen-cast video source) " +
             "senderCodecs=\(senderCodecSummary())"
         )
+    }
+
+    func updateSettings(maxFps: Int, bitrate: Int) {
+        let normalizedFps = max(1, min(120, maxFps))
+        let normalizedBitrate = max(100_000, bitrate)
+        queue.async {
+            guard self.maxFps != normalizedFps || self.targetBitrate != normalizedBitrate else { return }
+            self.maxFps = normalizedFps
+            self.targetBitrate = normalizedBitrate
+            if self.lastOutputWidth > 0, self.lastOutputHeight > 0 {
+                self.videoSource.adaptOutputFormat(
+                    toWidth: Int32(self.lastOutputWidth),
+                    height: Int32(self.lastOutputHeight),
+                    fps: Int32(self.maxFps)
+                )
+            }
+            if let session = self.session {
+                self.applyBitrateSettings(to: session)
+            }
+            print("[webrtc] Settings updated fps=\(normalizedFps) bitrate=\(normalizedBitrate)")
+        }
     }
 
     func handleOffer(_ request: WebRTCOfferPayload) throws -> WebRTCAnswerPayload {
@@ -77,8 +101,12 @@ final class WebRTCPublisher {
             if width != self.lastOutputWidth || height != self.lastOutputHeight {
                 self.lastOutputWidth = width
                 self.lastOutputHeight = height
-                self.videoSource.adaptOutputFormat(toWidth: Int32(width), height: Int32(height), fps: 30)
-                print("[webrtc] Video source output format: \(width)x\(height) @ 30fps")
+                self.videoSource.adaptOutputFormat(
+                    toWidth: Int32(width),
+                    height: Int32(height),
+                    fps: Int32(self.maxFps)
+                )
+                print("[webrtc] Video source output format: \(width)x\(height) @ \(self.maxFps)fps")
             }
             if !self.loggedInputFormat {
                 self.loggedInputFormat = true
@@ -93,11 +121,16 @@ final class WebRTCPublisher {
                 rotation: ._0,
                 timeStampNs: timeNs
             )
+            let convertStartNs = DispatchTime.now().uptimeNanoseconds
             let frame = cvFrame.newI420()
             self.videoSource.capturer(self.capturer, didCapture: frame)
+            let convertDurationMs = Double(DispatchTime.now().uptimeNanoseconds - convertStartNs) / 1_000_000.0
             self.sentFrameCount += 1
             if self.shouldLogFrame(self.sentFrameCount) {
-                print("[webrtc] Sent video frame #\(self.sentFrameCount) size=\(width)x\(height) timestampNs=\(timeNs)")
+                print(
+                    "[webrtc] Sent video frame #\(self.sentFrameCount) size=\(width)x\(height) " +
+                    "timestampNs=\(timeNs) i420Ms=\(String(format: "%.2f", convertDurationMs))"
+                )
             }
         }
     }
@@ -116,6 +149,7 @@ final class WebRTCPublisher {
         queue.sync {
             session?.close()
             session = nil
+            onActiveChanged?(false)
         }
     }
 
@@ -145,6 +179,8 @@ final class WebRTCPublisher {
         )
         let delegate = WebRTCSessionDelegate(onInput: { [weak self] data in
             self?.onInput?(data)
+        }, onClosed: { [weak self] peerConnection in
+            self?.clearSession(peerConnection)
         })
         guard let peerConnection = factory.peerConnection(
             with: config,
@@ -158,6 +194,7 @@ final class WebRTCPublisher {
         let session = WebRTCSession(peerConnection: peerConnection, delegate: delegate)
         self.session?.close()
         self.session = session
+        onActiveChanged?(true)
 
         let remoteDescription = LKRTCSessionDescription(type: .offer, sdp: request.sdp)
         peerConnection.setRemoteDescription(remoteDescription) { error in
@@ -225,6 +262,11 @@ final class WebRTCPublisher {
             print("[webrtc] Failed to set video transceiver direction: \(directionError.localizedDescription)")
         }
         applyVideoCodecPreference(codec, to: transceiver)
+        let session = self.session
+        session?.videoSender = transceiver.sender
+        if let session {
+            applyBitrateSettings(to: session)
+        }
     }
 
     private func createFallbackVideoTransceiver(on peerConnection: LKRTCPeerConnection) -> LKRTCRtpTransceiver? {
@@ -432,6 +474,44 @@ final class WebRTCPublisher {
         print("[webrtc] Preferred video codec: \(preferredName)")
     }
 
+    private func applyBitrateSettings(to session: WebRTCSession) {
+        guard let sender = session.videoSender else { return }
+        let parameters = sender.parameters
+        let encodings = parameters.encodings.isEmpty
+            ? [LKRTCRtpEncodingParameters()]
+            : parameters.encodings
+        let maxBitrate = NSNumber(value: targetBitrate)
+        let minBitrate = NSNumber(value: max(100_000, targetBitrate / 4))
+        let fps = NSNumber(value: maxFps)
+        for encoding in encodings {
+            encoding.isActive = true
+            encoding.maxBitrateBps = maxBitrate
+            encoding.minBitrateBps = minBitrate
+            encoding.maxFramerate = fps
+        }
+        parameters.encodings = encodings
+        sender.parameters = parameters
+        let bweUpdated = session.peerConnection.setBweMinBitrateBps(
+            minBitrate,
+            currentBitrateBps: maxBitrate,
+            maxBitrateBps: maxBitrate
+        )
+        print(
+            "[webrtc] Sender parameters fps=\(maxFps) minBitrate=\(minBitrate) " +
+            "maxBitrate=\(maxBitrate) bweUpdated=\(bweUpdated)"
+        )
+    }
+
+    private func clearSession(_ peerConnection: LKRTCPeerConnection?) {
+        queue.async {
+            guard let session = self.session, session.peerConnection === peerConnection else { return }
+            session.close()
+            self.session = nil
+            self.onActiveChanged?(false)
+            print("[webrtc] Peer connection closed; publisher inactive")
+        }
+    }
+
     private func senderCodecSummary() -> String {
         let names = factory.rtpSenderCapabilities(forKind: "video").codecs.map { capability in
             capability.mimeType.isEmpty ? capability.name : capability.mimeType
@@ -451,6 +531,7 @@ final class WebRTCPublisher {
 private final class WebRTCSession {
     let peerConnection: LKRTCPeerConnection
     let delegate: WebRTCSessionDelegate
+    var videoSender: LKRTCRtpSender?
     private let iceGatheringTimeout: DispatchTimeInterval = .milliseconds(3_000)
 
     init(peerConnection: LKRTCPeerConnection, delegate: WebRTCSessionDelegate) {
@@ -491,14 +572,16 @@ private final class WebRTCSession {
 
 private final class WebRTCSessionDelegate: NSObject, LKRTCPeerConnectionDelegate, LKRTCDataChannelDelegate {
     private let onInput: (Data) -> Void
+    private let onClosed: (LKRTCPeerConnection) -> Void
     private let iceGatheringCompleteHandlerLock = NSLock()
     private var iceGatheringCompleteHandler: (() -> Void)?
     private let candidatesLock = NSLock()
     private var generatedCandidates: [LKRTCIceCandidate] = []
     private var statsScheduled = false
 
-    init(onInput: @escaping (Data) -> Void) {
+    init(onInput: @escaping (Data) -> Void, onClosed: @escaping (LKRTCPeerConnection) -> Void) {
         self.onInput = onInput
+        self.onClosed = onClosed
     }
 
     func peerConnection(_ peerConnection: LKRTCPeerConnection, didChange stateChanged: LKRTCSignalingState) {}
@@ -509,6 +592,14 @@ private final class WebRTCSessionDelegate: NSObject, LKRTCPeerConnectionDelegate
         print("[webrtc] ICE connection state: \(newState.rawValue)")
         if newState == .connected || newState == .completed {
             scheduleOutboundStats(peerConnection)
+        } else if newState == .failed || newState == .closed {
+            onClosed(peerConnection)
+        }
+    }
+    func peerConnection(_ peerConnection: LKRTCPeerConnection, didChange newState: LKRTCPeerConnectionState) {
+        print("[webrtc] Peer connection state: \(newState.rawValue)")
+        if newState == .failed || newState == .closed {
+            onClosed(peerConnection)
         }
     }
     func peerConnection(_ peerConnection: LKRTCPeerConnection, didChange newState: LKRTCIceGatheringState) {
