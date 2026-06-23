@@ -164,7 +164,15 @@ final class WebRTCPublisher {
                     }
                     session.waitForIceGathering { completed in
                         let local = peerConnection.localDescription ?? answer
-                        let candidateCounts = self.iceCandidateCounts(in: local.sdp)
+                        let gatheredCandidates = delegate.generatedCandidatesSnapshot()
+                        let finalSdp = self.sdpWithGatheredCandidates(
+                            local.sdp,
+                            candidates: gatheredCandidates
+                        )
+                        var candidateCounts = self.iceCandidateCounts(in: finalSdp)
+                        if candidateCounts.isEmpty {
+                            candidateCounts = self.iceCandidateCounts(in: gatheredCandidates)
+                        }
                         if !completed {
                             print("[webrtc] ICE gathering timed out; proceeding with candidates gathered so far: \(candidateCounts)")
                         } else if self.hasCredentialedTurnServer(request.iceServers), candidateCounts["relay", default: 0] == 0 {
@@ -174,7 +182,7 @@ final class WebRTCPublisher {
                         }
                         completion(.success(WebRTCAnswerPayload(
                             type: LKRTCSessionDescription.string(for: local.type),
-                            sdp: local.sdp
+                            sdp: finalSdp
                         )))
                     }
                 }
@@ -257,8 +265,9 @@ final class WebRTCPublisher {
     private func iceCandidateCounts(in sdp: String) -> [String: Int] {
         var counts: [String: Int] = [:]
         for line in sdp.split(separator: "\n") {
-            guard line.hasPrefix("a=candidate:") else { continue }
-            let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmedLine.hasPrefix("a=candidate:") else { continue }
+            let parts = trimmedLine.split(whereSeparator: { $0 == " " || $0 == "\t" })
             if let typeIndex = parts.firstIndex(of: "typ"), parts.indices.contains(parts.index(after: typeIndex)) {
                 counts[String(parts[parts.index(after: typeIndex)]), default: 0] += 1
             } else {
@@ -266,6 +275,117 @@ final class WebRTCPublisher {
             }
         }
         return counts
+    }
+
+    private func iceCandidateCounts(in candidates: [LKRTCIceCandidate]) -> [String: Int] {
+        var counts: [String: Int] = [:]
+        for candidate in candidates {
+            let candidateLine = candidate.sdp.hasPrefix("a=")
+                ? candidate.sdp
+                : "a=\(candidate.sdp)"
+            let parts = candidateLine.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            if let typeIndex = parts.firstIndex(of: "typ"), parts.indices.contains(parts.index(after: typeIndex)) {
+                counts[String(parts[parts.index(after: typeIndex)]), default: 0] += 1
+            } else {
+                counts["unknown", default: 0] += 1
+            }
+        }
+        return counts
+    }
+
+    private func sdpWithGatheredCandidates(_ sdp: String, candidates: [LKRTCIceCandidate]) -> String {
+        let newline = sdp.contains("\r\n") ? "\r\n" : "\n"
+        var lines = sdp.components(separatedBy: newline)
+        let hadTrailingNewline = lines.last == ""
+        if hadTrailingNewline {
+            lines.removeLast()
+        }
+        var existingCandidateLines = Set<String>()
+        var sectionsNeedingEndMarker = Set<Int>()
+        var currentSection = -1
+        for line in lines {
+            if line.hasPrefix("m=") {
+                currentSection += 1
+            } else if line.hasPrefix("a=candidate:"), currentSection >= 0 {
+                existingCandidateLines.insert(line)
+                sectionsNeedingEndMarker.insert(currentSection)
+            }
+        }
+        var sectionCandidates: [Int: [String]] = [:]
+
+        for candidate in candidates {
+            let candidateLine = candidate.sdp.hasPrefix("a=")
+                ? candidate.sdp
+                : "a=\(candidate.sdp)"
+            let sectionIndex = mediaSectionIndex(
+                in: lines,
+                sdpMid: candidate.sdpMid,
+                sdpMLineIndex: candidate.sdpMLineIndex
+            )
+            sectionsNeedingEndMarker.insert(sectionIndex)
+            guard !existingCandidateLines.contains(candidateLine) else { continue }
+            existingCandidateLines.insert(candidateLine)
+            sectionCandidates[sectionIndex, default: []].append(candidateLine)
+        }
+
+        for sectionIndex in sectionsNeedingEndMarker.sorted(by: >) {
+            let sectionRange = mediaSectionRange(in: lines, sectionIndex: sectionIndex)
+            let insertIndex = endOfCandidatesIndex(in: lines, range: sectionRange) ?? sectionRange.upperBound
+            var insertedLines = sectionCandidates[sectionIndex] ?? []
+            if endOfCandidatesIndex(in: lines, range: sectionRange) == nil {
+                insertedLines.append("a=end-of-candidates")
+            }
+            guard !insertedLines.isEmpty else { continue }
+            lines.insert(contentsOf: insertedLines, at: insertIndex)
+        }
+
+        let body = lines.joined(separator: newline)
+        return hadTrailingNewline ? "\(body)\(newline)" : body
+    }
+
+    private func mediaSectionIndex(
+        in lines: [String],
+        sdpMid: String?,
+        sdpMLineIndex: Int32
+    ) -> Int {
+        if let sdpMid {
+            var currentSection = -1
+            for line in lines {
+                if line.hasPrefix("m=") {
+                    currentSection += 1
+                } else if line == "a=mid:\(sdpMid)", currentSection >= 0 {
+                    return currentSection
+                }
+            }
+        }
+        let candidateIndex = Int(sdpMLineIndex)
+        return candidateIndex >= 0 ? candidateIndex : 0
+    }
+
+    private func mediaSectionRange(in lines: [String], sectionIndex: Int) -> Range<Int> {
+        var currentSection = -1
+        var start = lines.count
+        for (index, line) in lines.enumerated() where line.hasPrefix("m=") {
+            currentSection += 1
+            if currentSection == sectionIndex {
+                start = index
+            } else if currentSection > sectionIndex, start < lines.count {
+                return start..<index
+            }
+        }
+        if start < lines.count {
+            return start..<lines.count
+        }
+        return lines.count..<lines.count
+    }
+
+    private func endOfCandidatesIndex(in lines: [String], range: Range<Int>) -> Int? {
+        for index in range {
+            if lines[index] == "a=end-of-candidates" {
+                return index
+            }
+        }
+        return nil
     }
 
     private func applyVideoCodecPreference(_ codec: String?, to transceiver: LKRTCRtpTransceiver) {
@@ -331,10 +451,6 @@ private final class WebRTCSession {
     }
 
     func waitForIceGathering(_ completion: @escaping (Bool) -> Void) {
-        if peerConnection.iceGatheringState == .complete {
-            completion(true)
-            return
-        }
         let lock = NSLock()
         var finished = false
         let finish = { [weak delegate] (completed: Bool) in
@@ -344,12 +460,16 @@ private final class WebRTCSession {
                 return
             }
             finished = true
-            delegate?.onIceGatheringComplete = nil
+            delegate?.setIceGatheringCompleteHandler(nil)
             lock.unlock()
             completion(completed)
         }
-        delegate.onIceGatheringComplete = {
+        delegate.setIceGatheringCompleteHandler {
             finish(true)
+        }
+        if peerConnection.iceGatheringState == .complete {
+            finish(true)
+            return
         }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + iceGatheringTimeout) {
             finish(false)
@@ -362,8 +482,11 @@ private final class WebRTCSession {
 }
 
 private final class WebRTCSessionDelegate: NSObject, LKRTCPeerConnectionDelegate, LKRTCDataChannelDelegate {
-    var onIceGatheringComplete: (() -> Void)?
     private let onInput: (Data) -> Void
+    private let iceGatheringCompleteHandlerLock = NSLock()
+    private var iceGatheringCompleteHandler: (() -> Void)?
+    private let candidatesLock = NSLock()
+    private var generatedCandidates: [LKRTCIceCandidate] = []
     private var statsScheduled = false
 
     init(onInput: @escaping (Data) -> Void) {
@@ -383,12 +506,14 @@ private final class WebRTCSessionDelegate: NSObject, LKRTCPeerConnectionDelegate
     func peerConnection(_ peerConnection: LKRTCPeerConnection, didChange newState: LKRTCIceGatheringState) {
         print("[webrtc] ICE gathering state: \(newState.rawValue)")
         if newState == .complete {
-            let completion = onIceGatheringComplete
-            onIceGatheringComplete = nil
+            let completion = consumeIceGatheringCompleteHandler()
             completion?()
         }
     }
     func peerConnection(_ peerConnection: LKRTCPeerConnection, didGenerate candidate: LKRTCIceCandidate) {
+        candidatesLock.lock()
+        generatedCandidates.append(candidate)
+        candidatesLock.unlock()
         print("[webrtc] ICE candidate gathered: \(candidateSummary(candidate))")
     }
     func peerConnection(_ peerConnection: LKRTCPeerConnection, didRemove candidates: [LKRTCIceCandidate]) {}
@@ -416,6 +541,27 @@ private final class WebRTCSessionDelegate: NSObject, LKRTCPeerConnectionDelegate
 
     func dataChannel(_ dataChannel: LKRTCDataChannel, didReceiveMessageWith buffer: LKRTCDataBuffer) {
         onInput(buffer.data)
+    }
+
+    func generatedCandidatesSnapshot() -> [LKRTCIceCandidate] {
+        candidatesLock.lock()
+        let candidates = generatedCandidates
+        candidatesLock.unlock()
+        return candidates
+    }
+
+    func setIceGatheringCompleteHandler(_ handler: (() -> Void)?) {
+        iceGatheringCompleteHandlerLock.lock()
+        iceGatheringCompleteHandler = handler
+        iceGatheringCompleteHandlerLock.unlock()
+    }
+
+    private func consumeIceGatheringCompleteHandler() -> (() -> Void)? {
+        iceGatheringCompleteHandlerLock.lock()
+        let handler = iceGatheringCompleteHandler
+        iceGatheringCompleteHandler = nil
+        iceGatheringCompleteHandlerLock.unlock()
+        return handler
     }
 
     private func candidateSummary(_ candidate: LKRTCIceCandidate) -> String {
