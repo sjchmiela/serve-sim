@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 type IceServer = {
   urls: string[];
@@ -7,11 +7,6 @@ type IceServer = {
 };
 
 type WebRtcCodec = "vp8" | "vp9" | "h264";
-
-export type DataChannelTarget = {
-  readyState: number;
-  send(data: ArrayBuffer): void;
-};
 
 const DEFAULT_ICE_SERVERS: IceServer[] = [
   { urls: ["stun:stun.l.google.com:19302"] },
@@ -45,15 +40,6 @@ export function useWebRtcStream({
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const dataChannelRef = useRef<RTCDataChannel | null>(null);
-
-  const dataTarget: DataChannelTarget | null =
-    dataChannelRef.current && dataChannelRef.current.readyState === "open"
-      ? {
-          readyState: 1,
-          send: (data) => dataChannelRef.current?.send(data),
-        }
-      : null;
 
   useEffect(() => {
     if (!enabled || !url) return;
@@ -66,7 +52,6 @@ export function useWebRtcStream({
 
     let stopped = false;
     let pc: RTCPeerConnection | null = null;
-    let dc: RTCDataChannel | null = null;
     let offerController: AbortController | null = null;
     let offerTimeout: number | undefined;
     let offerTimedOut = false;
@@ -74,7 +59,6 @@ export function useWebRtcStream({
     setStream(null);
     setConnected(false);
     setError(null);
-    dataChannelRef.current = null;
 
     const waitForIce = (connection: RTCPeerConnection) =>
       new Promise<void>((resolve) => {
@@ -105,8 +89,6 @@ export function useWebRtcStream({
           iceServers: servers,
           iceTransportPolicy: hasCredentialedTurnServer(servers) ? "relay" : "all",
         });
-        dc = pc.createDataChannel("input", { ordered: false, maxRetransmits: 0 });
-        dataChannelRef.current = dc;
         const videoTransceiver = pc.addTransceiver("video", { direction: "recvonly" });
         const videoCapabilities = RTCRtpReceiver.getCapabilities("video");
         const preferredMimeType = codec === "h264"
@@ -126,12 +108,6 @@ export function useWebRtcStream({
           ]);
         }
 
-        dc.onopen = () => {
-          if (!stopped) setConnected(true);
-        };
-        dc.onclose = () => {
-          if (!stopped) setConnected(false);
-        };
         pc.ontrack = (event) => {
           if (stopped) return;
           setStream(event.streams[0] ?? new MediaStream([event.track]));
@@ -188,13 +164,11 @@ export function useWebRtcStream({
       stopped = true;
       if (offerTimeout !== undefined) window.clearTimeout(offerTimeout);
       offerController?.abort();
-      dataChannelRef.current = null;
       setStream(null);
       setConnected(false);
-      dc?.close();
       pc?.close();
     };
   }, [enabled, url, codec, iceServers]);
 
-  return { stream, dataTarget, connected, error };
+  return { stream, connected, error };
 }

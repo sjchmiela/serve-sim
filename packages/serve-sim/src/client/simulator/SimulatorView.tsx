@@ -235,6 +235,7 @@ export function SimulatorView({
     let cancelled = false;
     let frameCallbackHandle: number | null = null;
     let startupWatchdog: ReturnType<typeof setTimeout> | null = null;
+    let readinessPoll: ReturnType<typeof setInterval> | null = null;
 
     const updateVideoDimensions = () => {
       if (video.videoWidth > 0 && video.videoHeight > 0) {
@@ -246,13 +247,15 @@ export function SimulatorView({
       updateVideoDimensions();
       lastFrameAtRef.current = Date.now();
       frameCountRef.current++;
-      if (!connectedRef.current) {
-        setConnected(true);
-        setError(null);
-      }
+      setConnected(true);
+      setError(null);
       if (startupWatchdog) {
         clearTimeout(startupWatchdog);
         startupWatchdog = null;
+      }
+      if (readinessPoll) {
+        clearInterval(readinessPoll);
+        readinessPoll = null;
       }
     };
     const queueFrameCallback = () => {
@@ -264,25 +267,33 @@ export function SimulatorView({
     };
     const markPlayableFrame = () => {
       updateVideoDimensions();
-      if (!supportsFrameCallbacks && video.readyState >= video.HAVE_CURRENT_DATA) {
+      if (video.readyState >= video.HAVE_CURRENT_DATA) {
         markFrame();
       }
     };
 
-    video.srcObject = webRtcStream ?? null;
     setConnected(false);
     if (webRtcStream) {
       setError(null);
+      video.addEventListener("loadedmetadata", updateVideoDimensions);
+      video.addEventListener("loadeddata", markPlayableFrame);
+      video.addEventListener("canplay", markPlayableFrame);
+      video.addEventListener("playing", markPlayableFrame);
+      video.srcObject = webRtcStream;
+      setConnected(true);
+      markPlayableFrame();
+      readinessPoll = setInterval(markPlayableFrame, 100);
       startupWatchdog = setTimeout(() => {
-        if (!connectedRef.current) {
+        markPlayableFrame();
+        if (video.readyState < video.HAVE_CURRENT_DATA) {
+          setConnected(false);
           setError("Stream is not producing frames. The simulator may have stopped — try reconnecting.");
         }
       }, 6000);
-      video.addEventListener("loadedmetadata", updateVideoDimensions);
-      video.addEventListener("canplay", markPlayableFrame);
-      video.addEventListener("playing", markPlayableFrame);
       queueFrameCallback();
       void video.play().then(markPlayableFrame).catch(() => {});
+    } else {
+      video.srcObject = null;
     }
     return () => {
       cancelled = true;
@@ -293,7 +304,9 @@ export function SimulatorView({
         videoWithFrameCallbacks.cancelVideoFrameCallback(frameCallbackHandle);
       }
       if (startupWatchdog) clearTimeout(startupWatchdog);
+      if (readinessPoll) clearInterval(readinessPoll);
       video.removeEventListener("loadedmetadata", updateVideoDimensions);
+      video.removeEventListener("loadeddata", markPlayableFrame);
       video.removeEventListener("canplay", markPlayableFrame);
       video.removeEventListener("playing", markPlayableFrame);
       video.srcObject = null;
@@ -325,8 +338,8 @@ export function SimulatorView({
   const pendingBlobUrlRef = useRef<string | null>(null);
   const paintedBlobUrlRef = useRef<string | null>(null);
   useEffect(() => {
-    // AVCC paints the canvas via useAvccStream; skip the MJPEG relay <img>.
-    if (!relayMode || !subscribeFrame || useAvcc) return;
+    // AVCC/WebRTC paint their own surfaces; skip the MJPEG relay <img>.
+    if (!relayMode || !subscribeFrame || useAvcc || useWebRtc) return;
     // Startup watchdog: flag the stream as broken if no frame arrives within
     // the window. Catches the silent-failure mode where the helper accepts
     // the MJPEG connection but its underlying simulator was shut down —
@@ -381,7 +394,7 @@ export function SimulatorView({
         paintedBlobUrlRef.current = null;
       }
     };
-  }, [relayMode, subscribeFrame, useAvcc]);
+  }, [relayMode, subscribeFrame, useAvcc, useWebRtc]);
 
   // AVCC (H.264) decode → canvas. Inert unless `useAvcc`. Works in both
   // direct and relay mode (it only needs `url`).
@@ -633,7 +646,7 @@ export function SimulatorView({
   // only knows the stream is alive when frames arrive. Without this, killing
   // the upstream helper leaves the UI stuck on "live" forever.
   useEffect(() => {
-    if (!relayMode) return;
+    if (!relayMode || useWebRtc) return;
     const STALE_MS = 2000;
     const checkStaleness = () => {
       const last = lastFrameAtRef.current;
@@ -654,7 +667,7 @@ export function SimulatorView({
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [relayMode]);
+  }, [relayMode, useWebRtc]);
 
   const getViewElement = useCallback(() => {
     if (useWebRtc) return videoRef.current;

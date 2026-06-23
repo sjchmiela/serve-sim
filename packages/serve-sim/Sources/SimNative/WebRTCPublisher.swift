@@ -207,7 +207,6 @@ final class WebRTCPublisher {
             print("[webrtc] Failed to set video transceiver direction: \(directionError.localizedDescription)")
         }
         applyVideoCodecPreference(codec, to: transceiver)
-        configureVideoSender(transceiver.sender)
     }
 
     private func createFallbackVideoTransceiver(on peerConnection: LKRTCPeerConnection) -> LKRTCRtpTransceiver? {
@@ -413,22 +412,6 @@ final class WebRTCPublisher {
         let orderedCodecs = preferredCodecs + remainingCodecs
         transceiver.codecPreferences = orderedCodecs
         print("[webrtc] Preferred video codec: \(preferredName)")
-    }
-
-    private func configureVideoSender(_ sender: LKRTCRtpSender) {
-        let parameters = sender.parameters
-        let encodings = parameters.encodings.isEmpty
-            ? [LKRTCRtpEncodingParameters()]
-            : parameters.encodings
-        for encoding in encodings {
-            encoding.isActive = true
-            encoding.maxFramerate = 30
-            encoding.maxBitrateBps = 3_000_000
-            encoding.scaleResolutionDownBy = 1
-        }
-        parameters.encodings = encodings
-        sender.parameters = parameters
-        print("[webrtc] Video sender configured: encodings=\(encodings.count) active=true maxFramerate=30 maxBitrateBps=3000000")
     }
 
     private func makeError(_ message: String) -> Error {
