@@ -76,6 +76,12 @@ final class CaptureEngine {
     private var statsScaleInputHeight = 0
     private var statsScaleOutputWidth = 0
     private var statsScaleOutputHeight = 0
+    private var statsCopyCount: Int64 = 0
+    private var statsCopyTotalMs = 0.0
+    private var statsCopyLastMs = 0.0
+    private var statsCopyMaxMs = 0.0
+    private var statsCopyWidth = 0
+    private var statsCopyHeight = 0
     private var statsMjpegReserved: Int64 = 0
     private var statsMjpegThrottleSkips: Int64 = 0
     private var statsH264Reserved: Int64 = 0
@@ -289,8 +295,21 @@ final class CaptureEngine {
         let dstStride = CVPixelBufferGetBytesPerRow(dst)
         let rows = CVPixelBufferGetHeight(source)
         let copyBytes = min(srcStride, dstStride)
+        let startNs = DispatchTime.now().uptimeNanoseconds
         for row in 0..<rows {
             memcpy(dstAddr + row * dstStride, srcAddr + row * srcStride, copyBytes)
+        }
+        let durationMs = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000.0
+        recordCopiedFrame(
+            width: width,
+            height: height,
+            durationMs: durationMs
+        )
+        if streamShouldLog(statsCopyCount) {
+            streamLog(
+                "[stream] copied frame #\(statsCopyCount) \(width)x\(height) " +
+                "ms=\(String(format: "%.2f", durationMs))"
+            )
         }
         return dst
     }
@@ -434,6 +453,7 @@ final class CaptureEngine {
         let uptimeSec = max(0.001, Double(nowNs - statsStartNs) / 1_000_000_000.0)
         let captureStats: [String: Any]
         let scaleStats: [String: Any]
+        let copyStats: [String: Any]
         let mjpegStats: [String: Any]
         let h264Stats: [String: Any]
         let webRTCStats: [String: Any]
@@ -457,6 +477,15 @@ final class CaptureEngine {
             "msLast": statsScaleLastMs,
             "msAvg": statsScaleCount > 0 ? statsScaleTotalMs / Double(statsScaleCount) : 0.0,
             "msMax": statsScaleMaxMs,
+        ]
+        copyStats = [
+            "frames": statsCopyCount,
+            "avgFps": Double(statsCopyCount) / uptimeSec,
+            "width": statsCopyWidth,
+            "height": statsCopyHeight,
+            "msLast": statsCopyLastMs,
+            "msAvg": statsCopyCount > 0 ? statsCopyTotalMs / Double(statsCopyCount) : 0.0,
+            "msMax": statsCopyMaxMs,
         ]
         mjpegStats = [
             "reserved": statsMjpegReserved,
@@ -487,6 +516,7 @@ final class CaptureEngine {
             "maxDimension": maxDimension,
             "capture": captureStats,
             "scale": scaleStats,
+            "copy": copyStats,
             "mjpeg": mjpegStats,
             "h264": h264Stats,
             "webrtc": webRTCStats,
@@ -530,6 +560,17 @@ final class CaptureEngine {
             statsScaleInputHeight = inputHeight
             statsScaleOutputWidth = outputWidth
             statsScaleOutputHeight = outputHeight
+        }
+    }
+
+    private func recordCopiedFrame(width: Int, height: Int, durationMs: Double) {
+        withStatsLock {
+            statsCopyCount += 1
+            statsCopyTotalMs += durationMs
+            statsCopyLastMs = durationMs
+            statsCopyMaxMs = max(statsCopyMaxMs, durationMs)
+            statsCopyWidth = width
+            statsCopyHeight = height
         }
     }
 

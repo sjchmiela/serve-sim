@@ -65,6 +65,17 @@ const WS_MSG_CONFIG = 0x82;
 const MJPEG_TRAILER = Buffer.from("\r\n", "ascii");
 const STREAM_DEBUG_ENV = process.env.SERVE_SIM_DEBUG_STREAM != null || process.env.SERVE_SIM_DEBUG_AVCC != null;
 
+interface StreamStatsSample {
+  atMs: number;
+  captureFrames: number;
+  copyFrames: number;
+  scaleFrames: number;
+  mjpegReserved: number;
+  webrtcReserved: number;
+  webrtcSentFrames: number;
+  webrtcRtpFramesSent: number;
+}
+
 function streamLog(message: string): void {
   if (STREAM_DEBUG_ENV) console.error(message);
   else debugStream(message);
@@ -84,6 +95,46 @@ function avccSeed(jpeg: Buffer): Buffer {
   out[4] = AVCC_SEED_TAG;
   jpeg.copy(out, 5);
   return out;
+}
+
+function numberAt(value: unknown, path: readonly string[]): number {
+  let current: unknown = value;
+  for (const key of path) {
+    if (!current || typeof current !== "object") return 0;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return typeof current === "number" && Number.isFinite(current) ? current : 0;
+}
+
+function firstReportNumberAt(value: unknown, path: readonly string[], field: string): number {
+  let current: unknown = value;
+  for (const key of path) {
+    if (!current || typeof current !== "object") return 0;
+    current = (current as Record<string, unknown>)[key];
+  }
+  if (!Array.isArray(current)) return 0;
+  for (const item of current) {
+    const n = numberAt(item, [field]);
+    if (n > 0) return n;
+  }
+  return 0;
+}
+
+function streamStatsSample(native: unknown): StreamStatsSample {
+  return {
+    atMs: Date.now(),
+    captureFrames: numberAt(native, ["capture", "frames"]),
+    copyFrames: numberAt(native, ["copy", "frames"]),
+    scaleFrames: numberAt(native, ["scale", "frames"]),
+    mjpegReserved: numberAt(native, ["mjpeg", "reserved"]),
+    webrtcReserved: numberAt(native, ["webrtc", "reserved"]),
+    webrtcSentFrames: numberAt(native, ["webrtc", "publisher", "sentFrames"]),
+    webrtcRtpFramesSent: firstReportNumberAt(native, ["webrtc", "publisher", "outboundRtp", "reports"], "framesSent"),
+  };
+}
+
+function perSecond(next: number, previous: number, elapsedSeconds: number): number {
+  return elapsedSeconds > 0 ? Math.max(0, next - previous) / elapsedSeconds : 0;
 }
 
 function readRequestBody(req: IncomingMessage): Promise<Buffer> {
@@ -123,6 +174,7 @@ export class DeviceSession {
   private readonly hidSockets = new Set<HidSocket>();
   private avccChunks = 0;
   private avccWrites = 0;
+  private lastStreamStatsSample: StreamStatsSample | null = null;
 
   constructor(
     public readonly udid: string,
@@ -300,6 +352,7 @@ export class DeviceSession {
   }
 
   handleStreamStats(_req: IncomingMessage, res: ServerResponse): void {
+    const native = this.capture.streamStats();
     this.sendJson(res, 200, {
       settings: this.streamSettings(),
       clients: {
@@ -309,7 +362,8 @@ export class DeviceSession {
       },
       latestJpegBytes: this.latestJpeg?.length ?? 0,
       config: this.screenConfig(),
-      native: this.capture.streamStats(),
+      recent: this.recentStreamStats(native),
+      native,
     });
   }
 
@@ -515,6 +569,24 @@ export class DeviceSession {
 
   private syncMjpegActive(): void {
     this.capture.setMjpegActive(this.mjpegClients.size > 0);
+  }
+
+  private recentStreamStats(native: unknown): Record<string, number> | null {
+    const sample = streamStatsSample(native);
+    const previous = this.lastStreamStatsSample;
+    this.lastStreamStatsSample = sample;
+    if (!previous) return null;
+    const elapsedSeconds = (sample.atMs - previous.atMs) / 1000;
+    return {
+      elapsedMs: sample.atMs - previous.atMs,
+      captureFps: perSecond(sample.captureFrames, previous.captureFrames, elapsedSeconds),
+      copyFps: perSecond(sample.copyFrames, previous.copyFrames, elapsedSeconds),
+      scaleFps: perSecond(sample.scaleFrames, previous.scaleFrames, elapsedSeconds),
+      mjpegReservedFps: perSecond(sample.mjpegReserved, previous.mjpegReserved, elapsedSeconds),
+      webrtcReservedFps: perSecond(sample.webrtcReserved, previous.webrtcReserved, elapsedSeconds),
+      webrtcSentFps: perSecond(sample.webrtcSentFrames, previous.webrtcSentFrames, elapsedSeconds),
+      webrtcRtpSentFps: perSecond(sample.webrtcRtpFramesSent, previous.webrtcRtpFramesSent, elapsedSeconds),
+    };
   }
 
   private configFrame(): Buffer | null {
