@@ -30,6 +30,10 @@ final class WebRTCPublisher {
     private let videoTrack: LKRTCVideoTrack
     private let capturer: LKRTCVideoCapturer
     private var session: WebRTCSession?
+    private var lastOutputWidth = 0
+    private var lastOutputHeight = 0
+    private var sentFrameCount: Int64 = 0
+    private var lastFrameTimestampNs: Int64 = 0
     var isActive: Bool {
         queue.sync { session != nil }
     }
@@ -37,6 +41,7 @@ final class WebRTCPublisher {
     init() {
         videoSource = factory.videoSource(forScreenCast: true)
         videoTrack = factory.videoTrack(with: videoSource, trackId: "simulator-video")
+        videoTrack.isEnabled = true
         capturer = LKRTCVideoCapturer(delegate: videoSource)
         print("[webrtc] Publisher ready (factory + screen-cast video source)")
     }
@@ -57,17 +62,36 @@ final class WebRTCPublisher {
     func sendFrame(_ pixelBuffer: CVPixelBuffer, timestamp: CMTime) {
         queue.async {
             guard self.session != nil else { return }
-            let captureTime = CMTimeGetSeconds(timestamp) * 1_000_000_000
-            let timeNs = captureTime.isFinite && captureTime > 0
-                ? Int64(captureTime)
-                : Int64(DispatchTime.now().uptimeNanoseconds)
+            let width = CVPixelBufferGetWidth(pixelBuffer)
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            if width != self.lastOutputWidth || height != self.lastOutputHeight {
+                self.lastOutputWidth = width
+                self.lastOutputHeight = height
+                self.videoSource.adaptOutputFormat(toWidth: Int32(width), height: Int32(height), fps: 30)
+                print("[webrtc] Video source output format: \(width)x\(height) @ 30fps")
+            }
+            let timeNs = self.nextFrameTimestampNs(timestamp)
             let frame = LKRTCVideoFrame(
                 buffer: LKRTCCVPixelBuffer(pixelBuffer: pixelBuffer),
                 rotation: ._0,
                 timeStampNs: timeNs
             )
             self.videoSource.capturer(self.capturer, didCapture: frame)
+            self.sentFrameCount += 1
+            if self.shouldLogFrame(self.sentFrameCount) {
+                print("[webrtc] Sent video frame #\(self.sentFrameCount) size=\(width)x\(height) timestampNs=\(timeNs)")
+            }
         }
+    }
+
+    private func nextFrameTimestampNs(_ timestamp: CMTime) -> Int64 {
+        let captureTime = CMTimeGetSeconds(timestamp) * 1_000_000_000
+        let proposedTimestamp = captureTime.isFinite && captureTime > 0
+            ? Int64(captureTime)
+            : Int64(DispatchTime.now().uptimeNanoseconds)
+        let timestampNs = max(proposedTimestamp, lastFrameTimestampNs + 1)
+        lastFrameTimestampNs = timestampNs
+        return timestampNs
     }
 
     func stop() {
@@ -173,6 +197,7 @@ final class WebRTCPublisher {
             print("[webrtc] Failed to set video transceiver direction: \(directionError.localizedDescription)")
         }
         applyVideoCodecPreference(codec, to: transceiver)
+        configureVideoSender(transceiver.sender)
     }
 
     private func createFallbackVideoTransceiver(on peerConnection: LKRTCPeerConnection) -> LKRTCRtpTransceiver? {
@@ -268,8 +293,28 @@ final class WebRTCPublisher {
         print("[webrtc] Preferred video codec: \(preferredName)")
     }
 
+    private func configureVideoSender(_ sender: LKRTCRtpSender) {
+        let parameters = sender.parameters
+        let encodings = parameters.encodings.isEmpty
+            ? [LKRTCRtpEncodingParameters()]
+            : parameters.encodings
+        for encoding in encodings {
+            encoding.isActive = true
+            encoding.maxFramerate = 30
+            encoding.maxBitrateBps = 3_000_000
+            encoding.scaleResolutionDownBy = 1
+        }
+        parameters.encodings = encodings
+        sender.parameters = parameters
+        print("[webrtc] Video sender configured: encodings=\(encodings.count) active=true maxFramerate=30 maxBitrateBps=3000000")
+    }
+
     private func makeError(_ message: String) -> Error {
         NSError(domain: "serve-sim.webrtc", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private func shouldLogFrame(_ count: Int64) -> Bool {
+        count <= 5 || count % 120 == 0
     }
 }
 
@@ -298,6 +343,7 @@ private final class WebRTCSession {
 private final class WebRTCSessionDelegate: NSObject, LKRTCPeerConnectionDelegate, LKRTCDataChannelDelegate {
     var onIceGatheringComplete: (() -> Void)?
     private let onInput: (Data) -> Void
+    private var statsScheduled = false
 
     init(onInput: @escaping (Data) -> Void) {
         self.onInput = onInput
@@ -309,6 +355,9 @@ private final class WebRTCSessionDelegate: NSObject, LKRTCPeerConnectionDelegate
     func peerConnectionShouldNegotiate(_ peerConnection: LKRTCPeerConnection) {}
     func peerConnection(_ peerConnection: LKRTCPeerConnection, didChange newState: LKRTCIceConnectionState) {
         print("[webrtc] ICE connection state: \(newState.rawValue)")
+        if newState == .connected || newState == .completed {
+            scheduleOutboundStats(peerConnection)
+        }
     }
     func peerConnection(_ peerConnection: LKRTCPeerConnection, didChange newState: LKRTCIceGatheringState) {
         print("[webrtc] ICE gathering state: \(newState.rawValue)")
@@ -361,5 +410,53 @@ private final class WebRTCSessionDelegate: NSObject, LKRTCPeerConnectionDelegate
         }
         let server = candidate.serverUrl?.isEmpty == false ? " server=\(candidate.serverUrl!)" : ""
         return "type=\(type) protocol=\(protocolName) address=\(address) port=\(port)\(server)"
+    }
+
+    private func scheduleOutboundStats(_ peerConnection: LKRTCPeerConnection) {
+        guard !statsScheduled else { return }
+        statsScheduled = true
+        logOutboundStats(peerConnection, label: "connected")
+        for seconds in [2.0, 5.0, 10.0] {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + seconds) { [weak self, weak peerConnection] in
+                guard let self, let peerConnection else { return }
+                self.logOutboundStats(peerConnection, label: "+\(Int(seconds))s")
+            }
+        }
+    }
+
+    private func logOutboundStats(_ peerConnection: LKRTCPeerConnection, label: String) {
+        peerConnection.statistics { report in
+            let videoStats = report.statistics.values
+                .filter { stat in
+                    stat.type == "outbound-rtp" &&
+                        ((stat.values["kind"] as? String) == "video" || (stat.values["mediaType"] as? String) == "video")
+                }
+                .map { stat in
+                    self.statSummary(stat, keys: [
+                        "bytesSent",
+                        "packetsSent",
+                        "framesEncoded",
+                        "framesSent",
+                        "keyFramesEncoded",
+                        "hugeFramesSent",
+                        "nackCount",
+                        "firCount",
+                        "pliCount",
+                    ])
+                }
+            if videoStats.isEmpty {
+                print("[webrtc] Outbound stats \(label): no video outbound-rtp stats")
+            } else {
+                print("[webrtc] Outbound stats \(label): \(videoStats.joined(separator: " | "))")
+            }
+        }
+    }
+
+    private func statSummary(_ stat: LKRTCStatistics, keys: [String]) -> String {
+        let values = keys.compactMap { key -> String? in
+            guard let value = stat.values[key] else { return nil }
+            return "\(key)=\(value)"
+        }
+        return "\(stat.id){\(values.joined(separator: " "))}"
     }
 }
