@@ -61,6 +61,7 @@ final class CaptureEngine {
     private var h264ThrottleSkips: Int64 = 0
     private var webRTCReservedCount: Int64 = 0
     private var webRTCThrottleSkips: Int64 = 0
+    private var webRTCDirectCount: Int64 = 0
     private var webRTCCopyFailures: Int64 = 0
     private var avccNativeEmitCount: Int64 = 0
     private var pixelBufferCopyCount: Int64 = 0
@@ -89,6 +90,7 @@ final class CaptureEngine {
     private var statsH264BackpressureSkips: Int64 = 0
     private var statsWebRTCReserved: Int64 = 0
     private var statsWebRTCThrottleSkips: Int64 = 0
+    private var statsWebRTCDirect: Int64 = 0
     private var statsWebRTCCopyFailures: Int64 = 0
     private var lastMjpegReservedAtNs: UInt64 = 0
     private var lastH264ReservedAtNs: UInt64 = 0
@@ -198,6 +200,16 @@ final class CaptureEngine {
         let shouldSendWebRTC = reserveWebRTCFrameIfNeeded()
         let shouldEncodeJpeg = mjpegActive && encoderReady && !encoding && reserveMjpegEncodeIfNeeded()
         if !shouldEncodeJpeg && h264Request == nil && !shouldSendWebRTC { return }
+
+        if shouldSendWebRTC && h264Request == nil && !shouldEncodeJpeg && encodeSize.width == w && encodeSize.height == h {
+            webRTCDirectCount += 1
+            recordWebRTCDirect()
+            if streamShouldLog(webRTCDirectCount) {
+                streamLog("[webrtc] send direct frame #\(webRTCDirectCount) \(w)x\(h)")
+            }
+            webRTCPublisher.sendFrameDirect(pixelBuffer, timestamp: timestamp)
+            return
+        }
 
         guard let stableFrame = copyPixelBuffer(pixelBuffer, targetWidth: encodeSize.width, targetHeight: encodeSize.height) else {
             if let h264Request {
@@ -504,6 +516,7 @@ final class CaptureEngine {
             "reserved": statsWebRTCReserved,
             "reservedAvgFps": Double(statsWebRTCReserved) / uptimeSec,
             "throttleSkips": statsWebRTCThrottleSkips,
+            "direct": statsWebRTCDirect,
             "copyFailures": statsWebRTCCopyFailures,
             "minFrameIntervalNs": webRTCMinFrameIntervalNs,
             "maxFps": webRTCMaxFps,
@@ -600,6 +613,10 @@ final class CaptureEngine {
 
     private func recordWebRTCThrottleSkip() {
         withStatsLock { statsWebRTCThrottleSkips += 1 }
+    }
+
+    private func recordWebRTCDirect() {
+        withStatsLock { statsWebRTCDirect += 1 }
     }
 
     private func recordWebRTCCopyFailure() {

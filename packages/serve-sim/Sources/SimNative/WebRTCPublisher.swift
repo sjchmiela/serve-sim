@@ -34,6 +34,8 @@ final class WebRTCPublisher {
     private var lastOutputWidth = 0
     private var lastOutputHeight = 0
     private var sentFrameCount: Int64 = 0
+    private var queuedInputFrameCount: Int64 = 0
+    private var directInputFrameCount: Int64 = 0
     private var lastFrameTimestampNs: Int64 = 0
     private let statsStartNs = DispatchTime.now().uptimeNanoseconds
     private var lastFrameSentAtNs: UInt64 = 0
@@ -101,46 +103,16 @@ final class WebRTCPublisher {
     func sendFrame(_ pixelBuffer: CVPixelBuffer, timestamp: CMTime) {
         queue.async {
             guard self.session != nil else { return }
-            let width = CVPixelBufferGetWidth(pixelBuffer)
-            let height = CVPixelBufferGetHeight(pixelBuffer)
-            if width != self.lastOutputWidth || height != self.lastOutputHeight {
-                self.lastOutputWidth = width
-                self.lastOutputHeight = height
-                self.videoSource.adaptOutputFormat(
-                    toWidth: Int32(width),
-                    height: Int32(height),
-                    fps: Int32(self.maxFps)
-                )
-                print("[webrtc] Video source output format: \(width)x\(height) @ \(self.maxFps)fps")
-            }
-            if !self.loggedInputFormat {
-                self.loggedInputFormat = true
-                let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
-                let supported = LKRTCCVPixelBuffer.supportedPixelFormats()
-                    .contains(NSNumber(value: UInt32(pixelFormat)))
-                print("[webrtc] Input pixel format: \(pixelFormat) cvPixelBufferSupported=\(supported); forwarding as I420")
-            }
-            let timeNs = self.nextFrameTimestampNs(timestamp)
-            let cvFrame = LKRTCVideoFrame(
-                buffer: LKRTCCVPixelBuffer(pixelBuffer: pixelBuffer),
-                rotation: ._0,
-                timeStampNs: timeNs
-            )
-            let convertStartNs = DispatchTime.now().uptimeNanoseconds
-            let frame = cvFrame.newI420()
-            self.videoSource.capturer(self.capturer, didCapture: frame)
-            let convertDurationMs = Double(DispatchTime.now().uptimeNanoseconds - convertStartNs) / 1_000_000.0
-            self.sentFrameCount += 1
-            self.lastFrameSentAtNs = DispatchTime.now().uptimeNanoseconds
-            self.lastI420Ms = convertDurationMs
-            self.totalI420Ms += convertDurationMs
-            self.maxI420Ms = max(self.maxI420Ms, convertDurationMs)
-            if self.shouldLogFrame(self.sentFrameCount) {
-                print(
-                    "[webrtc] Sent video frame #\(self.sentFrameCount) size=\(width)x\(height) " +
-                    "timestampNs=\(timeNs) i420Ms=\(String(format: "%.2f", convertDurationMs))"
-                )
-            }
+            self.queuedInputFrameCount += 1
+            self.sendFrameOnQueue(pixelBuffer, timestamp: timestamp, mode: "queued")
+        }
+    }
+
+    func sendFrameDirect(_ pixelBuffer: CVPixelBuffer, timestamp: CMTime) {
+        queue.sync {
+            guard self.session != nil else { return }
+            self.directInputFrameCount += 1
+            self.sendFrameOnQueue(pixelBuffer, timestamp: timestamp, mode: "direct")
         }
     }
 
@@ -155,6 +127,8 @@ final class WebRTCPublisher {
                 "outputWidth": lastOutputWidth,
                 "outputHeight": lastOutputHeight,
                 "sentFrames": sentFrameCount,
+                "queuedInputFrames": queuedInputFrameCount,
+                "directInputFrames": directInputFrameCount,
                 "avgSentFps": Double(sentFrameCount) / uptimeSec,
                 "lastFrameAgeMs": lastFrameAgeMs,
                 "i420MsLast": lastI420Ms,
@@ -176,6 +150,49 @@ final class WebRTCPublisher {
         let timestampNs = max(proposedTimestamp, lastFrameTimestampNs + 1)
         lastFrameTimestampNs = timestampNs
         return timestampNs
+    }
+
+    private func sendFrameOnQueue(_ pixelBuffer: CVPixelBuffer, timestamp: CMTime, mode: String) {
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        if width != lastOutputWidth || height != lastOutputHeight {
+            lastOutputWidth = width
+            lastOutputHeight = height
+            videoSource.adaptOutputFormat(
+                toWidth: Int32(width),
+                height: Int32(height),
+                fps: Int32(maxFps)
+            )
+            print("[webrtc] Video source output format: \(width)x\(height) @ \(maxFps)fps")
+        }
+        if !loggedInputFormat {
+            loggedInputFormat = true
+            let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+            let supported = LKRTCCVPixelBuffer.supportedPixelFormats()
+                .contains(NSNumber(value: UInt32(pixelFormat)))
+            print("[webrtc] Input pixel format: \(pixelFormat) cvPixelBufferSupported=\(supported); forwarding as I420")
+        }
+        let timeNs = nextFrameTimestampNs(timestamp)
+        let cvFrame = LKRTCVideoFrame(
+            buffer: LKRTCCVPixelBuffer(pixelBuffer: pixelBuffer),
+            rotation: ._0,
+            timeStampNs: timeNs
+        )
+        let convertStartNs = DispatchTime.now().uptimeNanoseconds
+        let frame = cvFrame.newI420()
+        videoSource.capturer(capturer, didCapture: frame)
+        let convertDurationMs = Double(DispatchTime.now().uptimeNanoseconds - convertStartNs) / 1_000_000.0
+        sentFrameCount += 1
+        lastFrameSentAtNs = DispatchTime.now().uptimeNanoseconds
+        lastI420Ms = convertDurationMs
+        totalI420Ms += convertDurationMs
+        maxI420Ms = max(maxI420Ms, convertDurationMs)
+        if shouldLogFrame(sentFrameCount) {
+            print(
+                "[webrtc] Sent video frame #\(sentFrameCount) mode=\(mode) size=\(width)x\(height) " +
+                "timestampNs=\(timeNs) i420Ms=\(String(format: "%.2f", convertDurationMs))"
+            )
+        }
     }
 
     func stop() {

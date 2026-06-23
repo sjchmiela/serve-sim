@@ -72,7 +72,10 @@ interface StreamStatsSample {
   scaleFrames: number;
   mjpegReserved: number;
   webrtcReserved: number;
+  webrtcDirect: number;
   webrtcSentFrames: number;
+  webrtcDirectInputFrames: number;
+  webrtcQueuedInputFrames: number;
   webrtcRtpFramesSent: number;
 }
 
@@ -128,7 +131,10 @@ function streamStatsSample(native: unknown): StreamStatsSample {
     scaleFrames: numberAt(native, ["scale", "frames"]),
     mjpegReserved: numberAt(native, ["mjpeg", "reserved"]),
     webrtcReserved: numberAt(native, ["webrtc", "reserved"]),
+    webrtcDirect: numberAt(native, ["webrtc", "direct"]),
     webrtcSentFrames: numberAt(native, ["webrtc", "publisher", "sentFrames"]),
+    webrtcDirectInputFrames: numberAt(native, ["webrtc", "publisher", "directInputFrames"]),
+    webrtcQueuedInputFrames: numberAt(native, ["webrtc", "publisher", "queuedInputFrames"]),
     webrtcRtpFramesSent: firstReportNumberAt(native, ["webrtc", "publisher", "outboundRtp", "reports"], "framesSent"),
   };
 }
@@ -584,7 +590,10 @@ export class DeviceSession {
       scaleFps: perSecond(sample.scaleFrames, previous.scaleFrames, elapsedSeconds),
       mjpegReservedFps: perSecond(sample.mjpegReserved, previous.mjpegReserved, elapsedSeconds),
       webrtcReservedFps: perSecond(sample.webrtcReserved, previous.webrtcReserved, elapsedSeconds),
+      webrtcDirectFps: perSecond(sample.webrtcDirect, previous.webrtcDirect, elapsedSeconds),
       webrtcSentFps: perSecond(sample.webrtcSentFrames, previous.webrtcSentFrames, elapsedSeconds),
+      webrtcDirectInputFps: perSecond(sample.webrtcDirectInputFrames, previous.webrtcDirectInputFrames, elapsedSeconds),
+      webrtcQueuedInputFps: perSecond(sample.webrtcQueuedInputFrames, previous.webrtcQueuedInputFrames, elapsedSeconds),
       webrtcRtpSentFps: perSecond(sample.webrtcRtpFramesSent, previous.webrtcRtpFramesSent, elapsedSeconds),
     };
   }
