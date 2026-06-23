@@ -1,7 +1,7 @@
 import Foundation
 import CoreVideo
 import CoreMedia
-import CoreImage
+import Accelerate
 
 // The capture + encode engine, reused verbatim from SimStreamHelper. Replicates
 // main.swift's frameHandler: MJPEG always encodes while clients exist; H.264 runs
@@ -37,7 +37,6 @@ final class CaptureEngine {
     private let frameCapture = FrameCapture()
     private var videoEncoder: VideoEncoder
     private let h264Encoder: H264Encoder
-    private let ciContext = CIContext(options: [.workingColorSpace: NSNull()])
     private let encodeQueue = DispatchQueue(label: "napi.encode", qos: .userInteractive)
     private let h264Queue = DispatchQueue(label: "napi.encode.h264", qos: .userInteractive)
     private static let h264EncodeTimeoutMs = 500
@@ -274,15 +273,34 @@ final class CaptureEngine {
             kCFAllocatorDefault, targetWidth, targetHeight, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &out
         ) == kCVReturnSuccess, let dst = out else { return nil }
 
-        let scaleX = CGFloat(targetWidth) / CGFloat(width)
-        let scaleY = CGFloat(targetHeight) / CGFloat(height)
-        let image = CIImage(cvPixelBuffer: source).transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
-        ciContext.render(
-            image,
-            to: dst,
-            bounds: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight),
-            colorSpace: CGColorSpaceCreateDeviceRGB()
+        CVPixelBufferLockBaseAddress(source, .readOnly)
+        CVPixelBufferLockBaseAddress(dst, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(dst, [])
+            CVPixelBufferUnlockBaseAddress(source, .readOnly)
+        }
+        guard let srcAddr = CVPixelBufferGetBaseAddress(source),
+              let dstAddr = CVPixelBufferGetBaseAddress(dst) else { return nil }
+
+        var src = vImage_Buffer(
+            data: srcAddr,
+            height: vImagePixelCount(height),
+            width: vImagePixelCount(width),
+            rowBytes: CVPixelBufferGetBytesPerRow(source)
         )
+        var dest = vImage_Buffer(
+            data: dstAddr,
+            height: vImagePixelCount(targetHeight),
+            width: vImagePixelCount(targetWidth),
+            rowBytes: CVPixelBufferGetBytesPerRow(dst)
+        )
+        let status = vImageScale_ARGB8888(
+            &src,
+            &dest,
+            nil,
+            vImage_Flags(kvImageHighQualityResampling)
+        )
+        guard status == kvImageNoError else { return nil }
         return dst
     }
 
