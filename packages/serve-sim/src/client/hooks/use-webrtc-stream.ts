@@ -44,62 +44,72 @@ export function useWebRtcStream({
 
   useEffect(() => {
     if (!enabled || !url) return;
-    let stopped = false;
-    const servers = iceServers?.length ? iceServers : DEFAULT_ICE_SERVERS;
-    const pc = new RTCPeerConnection({ iceServers: servers });
-    const dc = pc.createDataChannel("input", { ordered: false, maxRetransmits: 0 });
-    dataChannelRef.current = dc;
-    const videoTransceiver = pc.addTransceiver("video", { direction: "recvonly" });
-    const videoCapabilities = RTCRtpReceiver.getCapabilities("video");
-    const preferredMimeType = codec === "h264"
-      ? "video/H264"
-      : codec === "vp9"
-        ? "video/VP9"
-        : "video/VP8";
-    if (videoCapabilities?.codecs.length && "setCodecPreferences" in videoTransceiver) {
-      videoTransceiver.setCodecPreferences([
-        ...videoCapabilities.codecs.filter((candidate) => candidate.mimeType === preferredMimeType),
-        ...videoCapabilities.codecs.filter((candidate) => candidate.mimeType !== preferredMimeType),
-      ]);
+    if (typeof RTCPeerConnection === "undefined" || typeof RTCRtpReceiver === "undefined") {
+      setStream(null);
+      setConnected(false);
+      setError("WebRTC is not supported in this browser");
+      return;
     }
 
-    dc.onopen = () => {
-      if (!stopped) setConnected(true);
-    };
-    dc.onclose = () => {
-      if (!stopped) setConnected(false);
-    };
-    pc.ontrack = (event) => {
-      if (stopped) return;
-      setStream(event.streams[0] ?? new MediaStream([event.track]));
-      setConnected(true);
-      setError(null);
-    };
-    pc.onconnectionstatechange = () => {
-      if (stopped) return;
-      setConnected(pc.connectionState === "connected");
-      if (pc.connectionState === "failed") setError("WebRTC connection failed");
-    };
+    let stopped = false;
+    let pc: RTCPeerConnection | null = null;
+    let dc: RTCDataChannel | null = null;
+    const servers = iceServers?.length ? iceServers : DEFAULT_ICE_SERVERS;
 
-    const waitForIce = () =>
+    const waitForIce = (connection: RTCPeerConnection) =>
       new Promise<void>((resolve) => {
-        if (pc.iceGatheringState === "complete") {
+        if (connection.iceGatheringState === "complete") {
           resolve();
           return;
         }
         const onState = () => {
-          if (pc.iceGatheringState !== "complete") return;
-          pc.removeEventListener("icegatheringstatechange", onState);
+          if (connection.iceGatheringState !== "complete") return;
+          connection.removeEventListener("icegatheringstatechange", onState);
           resolve();
         };
-        pc.addEventListener("icegatheringstatechange", onState);
+        connection.addEventListener("icegatheringstatechange", onState);
       });
 
     (async () => {
       try {
+        pc = new RTCPeerConnection({ iceServers: servers });
+        dc = pc.createDataChannel("input", { ordered: false, maxRetransmits: 0 });
+        dataChannelRef.current = dc;
+        const videoTransceiver = pc.addTransceiver("video", { direction: "recvonly" });
+        const videoCapabilities = RTCRtpReceiver.getCapabilities("video");
+        const preferredMimeType = codec === "h264"
+          ? "video/H264"
+          : codec === "vp9"
+            ? "video/VP9"
+            : "video/VP8";
+        if (videoCapabilities?.codecs.length && "setCodecPreferences" in videoTransceiver) {
+          videoTransceiver.setCodecPreferences([
+            ...videoCapabilities.codecs.filter((candidate) => candidate.mimeType === preferredMimeType),
+            ...videoCapabilities.codecs.filter((candidate) => candidate.mimeType !== preferredMimeType),
+          ]);
+        }
+
+        dc.onopen = () => {
+          if (!stopped) setConnected(true);
+        };
+        dc.onclose = () => {
+          if (!stopped) setConnected(false);
+        };
+        pc.ontrack = (event) => {
+          if (stopped) return;
+          setStream(event.streams[0] ?? new MediaStream([event.track]));
+          setConnected(true);
+          setError(null);
+        };
+        pc.onconnectionstatechange = () => {
+          if (stopped || !pc) return;
+          setConnected(pc.connectionState === "connected");
+          if (pc.connectionState === "failed") setError("WebRTC connection failed");
+        };
+
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        await waitForIce();
+        await waitForIce(pc);
         const local = pc.localDescription;
         if (!local) throw new Error("WebRTC offer was not created");
         const response = await fetch(`${url}/webrtc/offer`, {
@@ -128,8 +138,8 @@ export function useWebRtcStream({
       dataChannelRef.current = null;
       setStream(null);
       setConnected(false);
-      dc.close();
-      pc.close();
+      dc?.close();
+      pc?.close();
     };
   }, [enabled, url, codec, iceServers]);
 

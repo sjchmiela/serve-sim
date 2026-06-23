@@ -104,11 +104,6 @@ final class WebRTCPublisher {
             return
         }
 
-        if let transceiver = peerConnection.addTransceiver(with: videoTrack) {
-            applyVideoCodecPreference(request.codec, to: transceiver)
-        } else {
-            _ = peerConnection.add(videoTrack, streamIds: ["stream0"])
-        }
         let session = WebRTCSession(peerConnection: peerConnection, delegate: delegate)
         self.session?.close()
         self.session = session
@@ -119,6 +114,7 @@ final class WebRTCPublisher {
                 completion(.failure(error))
                 return
             }
+            self.attachVideoTrack(to: peerConnection, codec: request.codec)
             peerConnection.answer(for: constraints) { answer, error in
                 if let error {
                     completion(.failure(error))
@@ -143,6 +139,32 @@ final class WebRTCPublisher {
                 }
             }
         }
+    }
+
+    private func attachVideoTrack(to peerConnection: LKRTCPeerConnection, codec: String?) {
+        let transceiver = peerConnection.transceivers.first { $0.mediaType == .video }
+            ?? createFallbackVideoTransceiver(on: peerConnection)
+        guard let transceiver else {
+            _ = peerConnection.add(videoTrack, streamIds: ["stream0"])
+            print("[webrtc] Could not find or create video transceiver; fell back to addTrack")
+            return
+        }
+
+        transceiver.sender.track = videoTrack
+        transceiver.sender.streamIds = ["stream0"]
+        var directionError: NSError?
+        transceiver.setDirection(.sendOnly, error: &directionError)
+        if let directionError {
+            print("[webrtc] Failed to set video transceiver direction: \(directionError.localizedDescription)")
+        }
+        applyVideoCodecPreference(codec, to: transceiver)
+    }
+
+    private func createFallbackVideoTransceiver(on peerConnection: LKRTCPeerConnection) -> LKRTCRtpTransceiver? {
+        let initOptions = LKRTCRtpTransceiverInit()
+        initOptions.direction = .sendOnly
+        initOptions.streamIds = ["stream0"]
+        return peerConnection.addTransceiver(with: videoTrack, init: initOptions)
     }
 
     private func iceServers(from payload: [WebRTCIceServerPayload]?) -> [LKRTCIceServer] {
