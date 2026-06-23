@@ -162,10 +162,12 @@ final class WebRTCPublisher {
                         completion(.failure(error))
                         return
                     }
-                    session.waitForIceGathering {
+                    session.waitForIceGathering { completed in
                         let local = peerConnection.localDescription ?? answer
                         let candidateCounts = self.iceCandidateCounts(in: local.sdp)
-                        if self.hasCredentialedTurnServer(request.iceServers), candidateCounts["relay", default: 0] == 0 {
+                        if !completed {
+                            print("[webrtc] ICE gathering timed out; proceeding with candidates gathered so far: \(candidateCounts)")
+                        } else if self.hasCredentialedTurnServer(request.iceServers), candidateCounts["relay", default: 0] == 0 {
                             print("[webrtc] WARNING: no relay ICE candidates gathered for credentialed TURN offer; counts=\(candidateCounts)")
                         } else {
                             print("[webrtc] ICE candidates gathered: \(candidateCounts)")
@@ -321,18 +323,37 @@ final class WebRTCPublisher {
 private final class WebRTCSession {
     let peerConnection: LKRTCPeerConnection
     let delegate: WebRTCSessionDelegate
+    private let iceGatheringTimeout: DispatchTimeInterval = .milliseconds(3_000)
 
     init(peerConnection: LKRTCPeerConnection, delegate: WebRTCSessionDelegate) {
         self.peerConnection = peerConnection
         self.delegate = delegate
     }
 
-    func waitForIceGathering(_ completion: @escaping () -> Void) {
+    func waitForIceGathering(_ completion: @escaping (Bool) -> Void) {
         if peerConnection.iceGatheringState == .complete {
-            completion()
+            completion(true)
             return
         }
-        delegate.onIceGatheringComplete = completion
+        let lock = NSLock()
+        var finished = false
+        let finish = { [weak delegate] (completed: Bool) in
+            lock.lock()
+            if finished {
+                lock.unlock()
+                return
+            }
+            finished = true
+            delegate?.onIceGatheringComplete = nil
+            lock.unlock()
+            completion(completed)
+        }
+        delegate.onIceGatheringComplete = {
+            finish(true)
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + iceGatheringTimeout) {
+            finish(false)
+        }
     }
 
     func close() {

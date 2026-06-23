@@ -101,6 +101,7 @@ const DEFAULT_STREAM_SETTINGS: StreamSettings = {
   h264MaxFps: 60,
   webrtcCodec: "h264",
 };
+const WEBRTC_FRAME_TIMEOUT_MS = 12_000;
 
 function streamSettingsFrom(input: Partial<StreamSettings> | null | undefined): StreamSettings {
   return {
@@ -528,7 +529,9 @@ function AppWithConfig({
   // `avccFallback` drives a startup timeout: if AVCC paints nothing in time,
   // drop to MJPEG, which every helper serves. See avcc-fallback.ts.
   const avcc = useAvccStream();
-  const useWebRtcVideo = streamSettings.transport === "webrtc";
+  const [webRtcFallback, setWebRtcFallback] = useState(false);
+  const wantsWebRtcVideo = streamSettings.transport === "webrtc";
+  const useWebRtcVideo = wantsWebRtcVideo && !webRtcFallback;
   const webrtc = useWebRtcStream({
     url: config.url,
     enabled: useWebRtcVideo,
@@ -548,6 +551,7 @@ function AppWithConfig({
   const serverForcesMjpeg = streamSettings.codec === "mjpeg";
   const useAvccVideo =
     !useWebRtcVideo &&
+    !webRtcFallback &&
     !serverForcesMjpeg &&
     avcc.supported &&
     !avccFallback.fellBack &&
@@ -559,7 +563,29 @@ function AppWithConfig({
   useEffect(() => {
     setStreaming(false);
     dispatchAvccFallback("reset");
-  }, [config.streamUrl, streamSettings.transport, streamSettings.codec, setStreaming]);
+    setWebRtcFallback(false);
+  }, [
+    config.streamUrl,
+    config.url,
+    streamSettings.transport,
+    streamSettings.codec,
+    streamSettings.webrtcCodec,
+    setStreaming,
+  ]);
+  // WebRTC is the lowest-latency path, but a failed negotiation should not
+  // leave the simulator blank. If no decoded frame arrives in the startup
+  // window, fall back to MJPEG for the current stream.
+  useEffect(() => {
+    if (!useWebRtcVideo) return;
+    if (webrtc.error) {
+      setWebRtcFallback(true);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (!streaming) setWebRtcFallback(true);
+    }, WEBRTC_FRAME_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [useWebRtcVideo, webrtc.error, streaming, config.streamUrl, streamSettings.webrtcCodec]);
   // `streaming` flips true on the first painted AVCC frame (JPEG seed decodes
   // sub-second on a healthy helper), which cancels the fallback.
   useEffect(() => {
