@@ -642,6 +642,7 @@ function serveHelperInProcess(
     case "/stream.mjpeg": session.handleMjpeg(req, res); return true;
     case "/stream.avcc": session.handleAvcc(req, res); return true;
     case "/stream-settings": void session.handleStreamSettings(req, res); return true;
+    case "/stream-stats": session.handleStreamStats(req, res); return true;
     case "/config": session.handleConfig(req, res); return true;
     case "/health": session.handleHealth(req, res); return true;
     case "/webrtc/offer": void session.handleWebRTCOffer(req, res); return true;
@@ -779,6 +780,7 @@ export function previewConfigForState(
   axEndpoint: string;
   devtoolsEndpoint: string;
   streamSettingsEndpoint: string;
+  streamStatsEndpoint: string;
   serveSimBin: string;
   gridApiEndpoint: string;
   gridStartEndpoint: string;
@@ -800,6 +802,7 @@ export function previewConfigForState(
     axEndpoint: endpoint(base, "/ax", state.device),
     devtoolsEndpoint: endpoint(base, "/devtools", state.device),
     streamSettingsEndpoint: endpoint(base, `/helper/${encodeURIComponent(state.device)}/stream-settings`, state.device),
+    streamStatsEndpoint: endpoint(base, `/helper/${encodeURIComponent(state.device)}/stream-stats`, state.device),
     serveSimBin,
     gridApiEndpoint: gridApiBase,
     gridStartEndpoint: gridApiBase + "/start",

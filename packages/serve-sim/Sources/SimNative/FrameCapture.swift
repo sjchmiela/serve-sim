@@ -34,7 +34,8 @@ final class FrameCapture {
     ///    idle sim never gets a cached frame to show.
     /// Re-emitting at ~5 fps fixes both without meaningful CPU cost.
     private static let defaultIdleRefreshFps = 5
-    private static let idleTimerTickMs: UInt64 = 33
+    private static let defaultIdleTimerTickMs: UInt64 = 33
+    private static let minIdleTimerTickMs: UInt64 = 4
 
     private var descriptors: [NSObject] = []
     private var callbackUUIDs: [ObjectIdentifier: NSUUID] = [:]
@@ -66,10 +67,12 @@ final class FrameCapture {
     func setIdleRefreshFps(_ fps: Int) {
         let normalizedFps = max(Self.defaultIdleRefreshFps, min(120, fps))
         let nextIntervalMs = max(1, UInt64(1_000 / normalizedFps))
+        let nextTickMs = min(Self.defaultIdleTimerTickMs, max(Self.minIdleTimerTickMs, nextIntervalMs))
         captureQueue.async { [weak self] in
             guard let self, self.idleIntervalMs != nextIntervalMs else { return }
             self.idleIntervalMs = nextIntervalMs
-            streamLog("[capture] Idle refresh fps=\(normalizedFps) intervalMs=\(nextIntervalMs)")
+            self.rescheduleIdleTimer(tickMs: nextTickMs)
+            streamLog("[capture] Idle refresh fps=\(normalizedFps) intervalMs=\(nextIntervalMs) tickMs=\(nextTickMs)")
         }
     }
 
@@ -203,8 +206,8 @@ final class FrameCapture {
 
     private func startIdleTimer() {
         let timer = DispatchSource.makeTimerSource(queue: captureQueue)
-        timer.schedule(deadline: .now().advanced(by: .milliseconds(Int(Self.idleTimerTickMs))),
-                       repeating: .milliseconds(Int(Self.idleTimerTickMs)))
+        timer.schedule(deadline: .now().advanced(by: .milliseconds(Int(Self.defaultIdleTimerTickMs))),
+                       repeating: .milliseconds(Int(Self.defaultIdleTimerTickMs)))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             let nowMs = DispatchTime.now().uptimeNanoseconds / 1_000_000
@@ -227,6 +230,13 @@ final class FrameCapture {
         }
         timer.resume()
         self.idleTimer = timer
+    }
+
+    private func rescheduleIdleTimer(tickMs: UInt64) {
+        idleTimer?.schedule(
+            deadline: .now().advanced(by: .milliseconds(Int(tickMs))),
+            repeating: .milliseconds(Int(tickMs))
+        )
     }
 
     // MARK: - Frame capture

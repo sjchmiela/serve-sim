@@ -51,6 +51,7 @@ describe("previewConfigForState", () => {
       axEndpoint: "/preview/ax?device=DEVICE-B",
       devtoolsEndpoint: "/preview/devtools?device=DEVICE-B",
       streamSettingsEndpoint: "/preview/helper/DEVICE-B/stream-settings?device=DEVICE-B",
+      streamStatsEndpoint: "/preview/helper/DEVICE-B/stream-stats?device=DEVICE-B",
       serveSimBin: "/bin/serve-sim",
       gridApiEndpoint: "/preview/grid/api",
       gridStartEndpoint: "/preview/grid/api/start",

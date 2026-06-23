@@ -8,6 +8,7 @@
  *   /ws            binary HID input protocol ([tag][JSON]) → NativeHid
  *   /config        { width, height, orientation }
  *   /health        { status: "ok" }
+ *   /stream-stats  native producer/copy/WebRTC diagnostics
  *   /ax            axe-shaped accessibility JSON (one-shot)
  *   /foreground    { bundleId, pid }
  *
@@ -278,6 +279,20 @@ export class DeviceSession {
 
   handleHealth(_req: IncomingMessage, res: ServerResponse): void {
     this.sendJson(res, 200, { status: "ok" });
+  }
+
+  handleStreamStats(_req: IncomingMessage, res: ServerResponse): void {
+    this.sendJson(res, 200, {
+      settings: this.streamSettings(),
+      clients: {
+        mjpeg: this.mjpegClients.size,
+        avcc: this.avccClients.size,
+        hid: this.hidSockets.size,
+      },
+      latestJpegBytes: this.latestJpeg?.length ?? 0,
+      config: this.screenConfig(),
+      native: this.capture.streamStats(),
+    });
   }
 
   async handleStreamSettings(req: IncomingMessage, res: ServerResponse): Promise<void> {

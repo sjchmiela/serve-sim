@@ -185,6 +185,10 @@ private func u32(_ v: Int) -> UInt32 {
         return ["width": w, "height": h]
     }
 
+    @NodeMethod func streamStats() -> String {
+        engine.statsJson()
+    }
+
     @NodeMethod func stop() {
         engine.stop()
     }

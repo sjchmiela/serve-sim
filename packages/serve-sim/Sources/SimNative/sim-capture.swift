@@ -62,6 +62,27 @@ final class CaptureEngine {
     private var webRTCThrottleSkips: Int64 = 0
     private var webRTCCopyFailures: Int64 = 0
     private var avccNativeEmitCount: Int64 = 0
+    private var pixelBufferCopyCount: Int64 = 0
+    private let statsLock = NSLock()
+    private let statsStartNs = DispatchTime.now().uptimeNanoseconds
+    private var statsCaptureFrames: Int64 = 0
+    private var statsLastCaptureAtNs: UInt64 = 0
+    private var statsScaleCount: Int64 = 0
+    private var statsScaleTotalMs = 0.0
+    private var statsScaleLastMs = 0.0
+    private var statsScaleMaxMs = 0.0
+    private var statsScaleInputWidth = 0
+    private var statsScaleInputHeight = 0
+    private var statsScaleOutputWidth = 0
+    private var statsScaleOutputHeight = 0
+    private var statsMjpegReserved: Int64 = 0
+    private var statsMjpegThrottleSkips: Int64 = 0
+    private var statsH264Reserved: Int64 = 0
+    private var statsH264ThrottleSkips: Int64 = 0
+    private var statsH264BackpressureSkips: Int64 = 0
+    private var statsWebRTCReserved: Int64 = 0
+    private var statsWebRTCThrottleSkips: Int64 = 0
+    private var statsWebRTCCopyFailures: Int64 = 0
     private var lastMjpegReservedAtNs: UInt64 = 0
     private var lastH264ReservedAtNs: UInt64 = 0
     private var lastWebRTCReservedAtNs: UInt64 = 0
@@ -144,6 +165,7 @@ final class CaptureEngine {
     private func handleFrame(_ pixelBuffer: CVPixelBuffer, timestamp: CMTime) {
         let w = CVPixelBufferGetWidth(pixelBuffer)
         let h = CVPixelBufferGetHeight(pixelBuffer)
+        recordCapturedFrame()
         let encodeSize = encodedSize(width: w, height: h)
 
         if !encoderReady || w != screenWidth || h != screenHeight || encodeSize.width != encodeWidth || encodeSize.height != encodeHeight {
@@ -170,6 +192,7 @@ final class CaptureEngine {
             }
             if shouldSendWebRTC {
                 webRTCCopyFailures += 1
+                recordWebRTCCopyFailure()
                 if streamShouldLog(webRTCCopyFailures) {
                     streamLog("[webrtc] failed to copy capture frame for WebRTC")
                 }
@@ -215,12 +238,14 @@ final class CaptureEngine {
         let now = DispatchTime.now().uptimeNanoseconds
         if lastMjpegReservedAtNs != 0 && now - lastMjpegReservedAtNs < mjpegMinFrameIntervalNs {
             mjpegThrottleSkips += 1
+            recordMjpegThrottleSkip()
             if streamShouldLog(mjpegThrottleSkips) {
                 streamLog("[stream:mjpeg] skip frame: fps throttle")
             }
             return false
         }
         lastMjpegReservedAtNs = now
+        recordMjpegReserved()
         return true
     }
 
@@ -315,13 +340,29 @@ final class CaptureEngine {
             width: vImagePixelCount(targetWidth),
             rowBytes: CVPixelBufferGetBytesPerRow(dst)
         )
+        let startNs = DispatchTime.now().uptimeNanoseconds
         let status = vImageScale_ARGB8888(
             &src,
             &dest,
             nil,
-            vImage_Flags(kvImageHighQualityResampling)
+            vImage_Flags(kvImageNoFlags)
         )
         guard status == kvImageNoError else { return nil }
+        let durationMs = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000.0
+        pixelBufferCopyCount += 1
+        recordScaledFrame(
+            inputWidth: width,
+            inputHeight: height,
+            outputWidth: targetWidth,
+            outputHeight: targetHeight,
+            durationMs: durationMs
+        )
+        if streamShouldLog(pixelBufferCopyCount) {
+            streamLog(
+                "[stream] scaled frame #\(pixelBufferCopyCount) \(width)x\(height)->\(targetWidth)x\(targetHeight) " +
+                "ms=\(String(format: "%.2f", durationMs))"
+            )
+        }
         return dst
     }
 
@@ -331,6 +372,7 @@ final class CaptureEngine {
             let now = DispatchTime.now().uptimeNanoseconds
             if !forceKeyframe && lastH264ReservedAtNs != 0 && now - lastH264ReservedAtNs < h264MinFrameIntervalNs {
                 h264ThrottleSkips += 1
+                recordH264ThrottleSkip()
                 if streamShouldLog(h264ThrottleSkips) {
                     streamLog("[stream:avcc] skip H.264 frame: fps throttle")
                 }
@@ -338,6 +380,7 @@ final class CaptureEngine {
             }
             guard !h264Encoding else {
                 h264BackpressureSkips += 1
+                recordH264BackpressureSkip()
                 if streamShouldLog(h264BackpressureSkips) {
                     streamLog("[stream:avcc] skip H.264 frame: encode pending token=\(h264FrameToken)")
                 }
@@ -350,6 +393,7 @@ final class CaptureEngine {
             forceKeyframe = false
             lastH264ReservedAtNs = now
             h264ReservedCount += 1
+            recordH264Reserved()
             if streamShouldLog(h264ReservedCount) || force {
                 streamLog("[stream:avcc] reserved H.264 frame #\(h264ReservedCount) token=\(token) forceKeyframe=\(force)")
             }
@@ -362,6 +406,7 @@ final class CaptureEngine {
         let now = DispatchTime.now().uptimeNanoseconds
         if lastWebRTCReservedAtNs != 0 && now - lastWebRTCReservedAtNs < webRTCMinFrameIntervalNs {
             webRTCThrottleSkips += 1
+            recordWebRTCThrottleSkip()
             if streamShouldLog(webRTCThrottleSkips) {
                 streamLog("[webrtc] skip frame: fps throttle")
             }
@@ -369,10 +414,146 @@ final class CaptureEngine {
         }
         lastWebRTCReservedAtNs = now
         webRTCReservedCount += 1
+        recordWebRTCReserved()
         if streamShouldLog(webRTCReservedCount) {
             streamLog("[webrtc] reserved frame #\(webRTCReservedCount)")
         }
         return true
+    }
+
+    func statsJson() -> String {
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        let uptimeSec = max(0.001, Double(nowNs - statsStartNs) / 1_000_000_000.0)
+        let captureStats: [String: Any]
+        let scaleStats: [String: Any]
+        let mjpegStats: [String: Any]
+        let h264Stats: [String: Any]
+        let webRTCStats: [String: Any]
+        statsLock.lock()
+        captureStats = [
+            "frames": statsCaptureFrames,
+            "avgFps": Double(statsCaptureFrames) / uptimeSec,
+            "lastFrameAgeMs": statsLastCaptureAtNs == 0 ? -1.0 : Double(nowNs - statsLastCaptureAtNs) / 1_000_000.0,
+            "screenWidth": screenWidth,
+            "screenHeight": screenHeight,
+            "encodeWidth": encodeWidth,
+            "encodeHeight": encodeHeight,
+        ]
+        scaleStats = [
+            "frames": statsScaleCount,
+            "avgFps": Double(statsScaleCount) / uptimeSec,
+            "inputWidth": statsScaleInputWidth,
+            "inputHeight": statsScaleInputHeight,
+            "outputWidth": statsScaleOutputWidth,
+            "outputHeight": statsScaleOutputHeight,
+            "msLast": statsScaleLastMs,
+            "msAvg": statsScaleCount > 0 ? statsScaleTotalMs / Double(statsScaleCount) : 0.0,
+            "msMax": statsScaleMaxMs,
+        ]
+        mjpegStats = [
+            "reserved": statsMjpegReserved,
+            "reservedAvgFps": Double(statsMjpegReserved) / uptimeSec,
+            "throttleSkips": statsMjpegThrottleSkips,
+        ]
+        h264Stats = [
+            "reserved": statsH264Reserved,
+            "reservedAvgFps": Double(statsH264Reserved) / uptimeSec,
+            "throttleSkips": statsH264ThrottleSkips,
+            "backpressureSkips": statsH264BackpressureSkips,
+            "active": avccActive,
+        ]
+        webRTCStats = [
+            "reserved": statsWebRTCReserved,
+            "reservedAvgFps": Double(statsWebRTCReserved) / uptimeSec,
+            "throttleSkips": statsWebRTCThrottleSkips,
+            "copyFailures": statsWebRTCCopyFailures,
+            "minFrameIntervalNs": webRTCMinFrameIntervalNs,
+            "maxFps": webRTCMaxFps,
+            "publisher": webRTCPublisher.statsSnapshot(nowNs: nowNs),
+        ]
+        statsLock.unlock()
+
+        let payload: [String: Any] = [
+            "uptimeMs": Double(nowNs - statsStartNs) / 1_000_000.0,
+            "maxDimension": maxDimension,
+            "capture": captureStats,
+            "scale": scaleStats,
+            "mjpeg": mjpegStats,
+            "h264": h264Stats,
+            "webrtc": webRTCStats,
+        ]
+        guard
+            JSONSerialization.isValidJSONObject(payload),
+            let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        else {
+            return "{\"error\":\"stream_stats_unavailable\"}"
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func withStatsLock(_ body: () -> Void) {
+        statsLock.lock()
+        body()
+        statsLock.unlock()
+    }
+
+    private func recordCapturedFrame() {
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        withStatsLock {
+            statsCaptureFrames += 1
+            statsLastCaptureAtNs = nowNs
+        }
+    }
+
+    private func recordScaledFrame(
+        inputWidth: Int,
+        inputHeight: Int,
+        outputWidth: Int,
+        outputHeight: Int,
+        durationMs: Double
+    ) {
+        withStatsLock {
+            statsScaleCount += 1
+            statsScaleTotalMs += durationMs
+            statsScaleLastMs = durationMs
+            statsScaleMaxMs = max(statsScaleMaxMs, durationMs)
+            statsScaleInputWidth = inputWidth
+            statsScaleInputHeight = inputHeight
+            statsScaleOutputWidth = outputWidth
+            statsScaleOutputHeight = outputHeight
+        }
+    }
+
+    private func recordMjpegReserved() {
+        withStatsLock { statsMjpegReserved += 1 }
+    }
+
+    private func recordMjpegThrottleSkip() {
+        withStatsLock { statsMjpegThrottleSkips += 1 }
+    }
+
+    private func recordH264Reserved() {
+        withStatsLock { statsH264Reserved += 1 }
+    }
+
+    private func recordH264ThrottleSkip() {
+        withStatsLock { statsH264ThrottleSkips += 1 }
+    }
+
+    private func recordH264BackpressureSkip() {
+        withStatsLock { statsH264BackpressureSkips += 1 }
+    }
+
+    private func recordWebRTCReserved() {
+        withStatsLock { statsWebRTCReserved += 1 }
+    }
+
+    private func recordWebRTCThrottleSkip() {
+        withStatsLock { statsWebRTCThrottleSkips += 1 }
+    }
+
+    private func recordWebRTCCopyFailure() {
+        withStatsLock { statsWebRTCCopyFailures += 1 }
     }
 
     private func finishH264Encode(token: UInt64, restoreKeyframe: Bool = false) {

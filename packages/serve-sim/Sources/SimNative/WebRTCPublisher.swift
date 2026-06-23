@@ -35,6 +35,11 @@ final class WebRTCPublisher {
     private var lastOutputHeight = 0
     private var sentFrameCount: Int64 = 0
     private var lastFrameTimestampNs: Int64 = 0
+    private let statsStartNs = DispatchTime.now().uptimeNanoseconds
+    private var lastFrameSentAtNs: UInt64 = 0
+    private var totalI420Ms = 0.0
+    private var lastI420Ms = 0.0
+    private var maxI420Ms = 0.0
     private var loggedInputFormat = false
     private var maxFps = 30
     private var targetBitrate = 6_000_000
@@ -126,12 +131,40 @@ final class WebRTCPublisher {
             self.videoSource.capturer(self.capturer, didCapture: frame)
             let convertDurationMs = Double(DispatchTime.now().uptimeNanoseconds - convertStartNs) / 1_000_000.0
             self.sentFrameCount += 1
+            self.lastFrameSentAtNs = DispatchTime.now().uptimeNanoseconds
+            self.lastI420Ms = convertDurationMs
+            self.totalI420Ms += convertDurationMs
+            self.maxI420Ms = max(self.maxI420Ms, convertDurationMs)
             if self.shouldLogFrame(self.sentFrameCount) {
                 print(
                     "[webrtc] Sent video frame #\(self.sentFrameCount) size=\(width)x\(height) " +
                     "timestampNs=\(timeNs) i420Ms=\(String(format: "%.2f", convertDurationMs))"
                 )
             }
+        }
+    }
+
+    func statsSnapshot(nowNs: UInt64 = DispatchTime.now().uptimeNanoseconds) -> [String: Any] {
+        queue.sync {
+            let uptimeSec = max(0.001, Double(nowNs - statsStartNs) / 1_000_000_000.0)
+            let lastFrameAgeMs = lastFrameSentAtNs == 0 ? -1.0 : Double(nowNs - lastFrameSentAtNs) / 1_000_000.0
+            var stats: [String: Any] = [
+                "active": session != nil,
+                "targetFps": maxFps,
+                "targetBitrate": targetBitrate,
+                "outputWidth": lastOutputWidth,
+                "outputHeight": lastOutputHeight,
+                "sentFrames": sentFrameCount,
+                "avgSentFps": Double(sentFrameCount) / uptimeSec,
+                "lastFrameAgeMs": lastFrameAgeMs,
+                "i420MsLast": lastI420Ms,
+                "i420MsAvg": sentFrameCount > 0 ? totalI420Ms / Double(sentFrameCount) : 0.0,
+                "i420MsMax": maxI420Ms,
+            ]
+            if let session {
+                stats["outboundRtp"] = session.delegate.outboundStatsSnapshot()
+            }
+            return stats
         }
     }
 
@@ -578,6 +611,10 @@ private final class WebRTCSessionDelegate: NSObject, LKRTCPeerConnectionDelegate
     private let candidatesLock = NSLock()
     private var generatedCandidates: [LKRTCIceCandidate] = []
     private var statsScheduled = false
+    private let outboundStatsLock = NSLock()
+    private var latestOutboundStatsLabel = "none"
+    private var latestOutboundStatsAtNs: UInt64 = 0
+    private var latestOutboundStats: [[String: Any]] = []
 
     init(onInput: @escaping (Data) -> Void, onClosed: @escaping (LKRTCPeerConnection) -> Void) {
         self.onInput = onInput
@@ -688,6 +725,18 @@ private final class WebRTCSessionDelegate: NSObject, LKRTCPeerConnectionDelegate
                 self.logOutboundStats(peerConnection, label: "+\(Int(seconds))s")
             }
         }
+        scheduleRecurringOutboundStats(peerConnection)
+    }
+
+    private func scheduleRecurringOutboundStats(_ peerConnection: LKRTCPeerConnection) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10.0) { [weak self, weak peerConnection] in
+            guard let self, let peerConnection else { return }
+            if peerConnection.connectionState == .failed || peerConnection.connectionState == .closed {
+                return
+            }
+            self.logOutboundStats(peerConnection, label: "periodic")
+            self.scheduleRecurringOutboundStats(peerConnection)
+        }
     }
 
     private func logOutboundStats(_ peerConnection: LKRTCPeerConnection, label: String) {
@@ -697,25 +746,61 @@ private final class WebRTCSessionDelegate: NSObject, LKRTCPeerConnectionDelegate
                     stat.type == "outbound-rtp" &&
                         ((stat.values["kind"] as? String) == "video" || (stat.values["mediaType"] as? String) == "video")
                 }
-                .map { stat in
-                    self.statSummary(stat, keys: [
-                        "bytesSent",
-                        "packetsSent",
-                        "framesEncoded",
-                        "framesSent",
-                        "keyFramesEncoded",
-                        "hugeFramesSent",
-                        "nackCount",
-                        "firCount",
-                        "pliCount",
-                    ])
-                }
+            let keys = [
+                "bytesSent",
+                "packetsSent",
+                "framesEncoded",
+                "framesSent",
+                "keyFramesEncoded",
+                "hugeFramesSent",
+                "nackCount",
+                "firCount",
+                "pliCount",
+            ]
+            let payloads = videoStats.map { stat in self.statPayload(stat, keys: keys) }
+            self.storeOutboundStats(label: label, stats: payloads)
             if videoStats.isEmpty {
                 print("[webrtc] Outbound stats \(label): no video outbound-rtp stats")
             } else {
-                print("[webrtc] Outbound stats \(label): \(videoStats.joined(separator: " | "))")
+                print("[webrtc] Outbound stats \(label): \(videoStats.map { self.statSummary($0, keys: keys) }.joined(separator: " | "))")
             }
         }
+    }
+
+    func outboundStatsSnapshot() -> [String: Any] {
+        outboundStatsLock.lock()
+        let stats = latestOutboundStats
+        let label = latestOutboundStatsLabel
+        let atNs = latestOutboundStatsAtNs
+        outboundStatsLock.unlock()
+        return [
+            "label": label,
+            "updatedAtNs": atNs,
+            "reports": stats,
+        ]
+    }
+
+    private func storeOutboundStats(label: String, stats: [[String: Any]]) {
+        outboundStatsLock.lock()
+        latestOutboundStatsLabel = label
+        latestOutboundStatsAtNs = DispatchTime.now().uptimeNanoseconds
+        latestOutboundStats = stats
+        outboundStatsLock.unlock()
+    }
+
+    private func statPayload(_ stat: LKRTCStatistics, keys: [String]) -> [String: Any] {
+        var payload: [String: Any] = ["id": stat.id, "type": stat.type]
+        for key in keys {
+            guard let value = stat.values[key] else { continue }
+            payload[key] = statValue(value)
+        }
+        return payload
+    }
+
+    private func statValue(_ value: NSObject) -> Any {
+        if let number = value as? NSNumber { return number }
+        if let string = value as? NSString { return String(string) }
+        return "\(value)"
     }
 
     private func statSummary(_ stat: LKRTCStatistics, keys: [String]) -> String {

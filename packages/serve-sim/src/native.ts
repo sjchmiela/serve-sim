@@ -45,6 +45,7 @@ interface SimCaptureHandle {
   ): void;
   handleWebRTCOffer(offerJson: string): string;
   screenSize(): { width: number; height: number };
+  streamStats(): string;
   stop(): void;
 }
 
@@ -261,6 +262,10 @@ export class NativeCapture {
 
   screenSize(): { width: number; height: number } {
     return this.handle.screenSize();
+  }
+
+  streamStats(): unknown {
+    return JSON.parse(this.handle.streamStats());
   }
 
   /** Halt frame production. Full teardown happens when this object is GC'd. */
