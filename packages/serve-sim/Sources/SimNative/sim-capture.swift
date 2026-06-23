@@ -39,6 +39,8 @@ final class CaptureEngine {
     private let h264Encoder: H264Encoder
     private let encodeQueue = DispatchQueue(label: "napi.encode", qos: .userInteractive)
     private let h264Queue = DispatchQueue(label: "napi.encode.h264", qos: .userInteractive)
+    private let framePreparationQueue = DispatchQueue(label: "napi.frame.prepare", qos: .userInteractive)
+    private let framePreparationLock = NSLock()
     private static let h264EncodeTimeoutMs = 500
 
     // Mirrors main.swift's globals; mutated from the capture queue, read from the
@@ -65,6 +67,7 @@ final class CaptureEngine {
     private var webRTCCopyFailures: Int64 = 0
     private var avccNativeEmitCount: Int64 = 0
     private var pixelBufferCopyCount: Int64 = 0
+    private var scaledFramePreparationPending = false
     private let statsLock = NSLock()
     private let statsStartNs = DispatchTime.now().uptimeNanoseconds
     private var statsCaptureFrames: Int64 = 0
@@ -73,6 +76,7 @@ final class CaptureEngine {
     private var statsScaleTotalMs = 0.0
     private var statsScaleLastMs = 0.0
     private var statsScaleMaxMs = 0.0
+    private var statsScaleBackpressureSkips: Int64 = 0
     private var statsScaleInputWidth = 0
     private var statsScaleInputHeight = 0
     private var statsScaleOutputWidth = 0
@@ -211,21 +215,66 @@ final class CaptureEngine {
             return
         }
 
-        guard let stableFrame = copyPixelBuffer(pixelBuffer, targetWidth: encodeSize.width, targetHeight: encodeSize.height) else {
-            if let h264Request {
-                streamLog("[stream:avcc] failed to copy capture frame for H.264 token=\(h264Request.token)")
-                finishH264Encode(token: h264Request.token, restoreKeyframe: h264Request.forceKeyframe)
-            }
-            if shouldSendWebRTC {
-                webRTCCopyFailures += 1
-                recordWebRTCCopyFailure()
-                if streamShouldLog(webRTCCopyFailures) {
-                    streamLog("[webrtc] failed to copy capture frame for WebRTC")
+        if encodeSize.width != w || encodeSize.height != h {
+            guard reserveScaledFramePreparation() else {
+                recordScaleBackpressureSkip()
+                if shouldEncodeJpeg { lastMjpegReservedAtNs = 0 }
+                if let h264Request {
+                    finishH264Encode(token: h264Request.token, restoreKeyframe: h264Request.forceKeyframe)
                 }
+                return
+            }
+            if shouldEncodeJpeg { encoding = true }
+            guard let stableSourceFrame = copyPixelBuffer(pixelBuffer) else {
+                finishScaledFramePreparation()
+                if shouldEncodeJpeg { encoding = false }
+                handleStableFrameFailure(h264Request: h264Request, shouldSendWebRTC: shouldSendWebRTC)
+                return
+            }
+            framePreparationQueue.async { [weak self] in
+                guard let self else { return }
+                defer { self.finishScaledFramePreparation() }
+                guard let stableFrame = self.copyPixelBuffer(
+                    stableSourceFrame,
+                    targetWidth: encodeSize.width,
+                    targetHeight: encodeSize.height
+                ) else {
+                    if shouldEncodeJpeg { self.encoding = false }
+                    self.handleStableFrameFailure(h264Request: h264Request, shouldSendWebRTC: shouldSendWebRTC)
+                    return
+                }
+                self.deliverStableFrame(
+                    stableFrame,
+                    timestamp: timestamp,
+                    shouldSendWebRTC: shouldSendWebRTC,
+                    shouldEncodeJpeg: shouldEncodeJpeg,
+                    h264Request: h264Request
+                )
             }
             return
         }
 
+        guard let stableFrame = copyPixelBuffer(pixelBuffer, targetWidth: encodeSize.width, targetHeight: encodeSize.height) else {
+            handleStableFrameFailure(h264Request: h264Request, shouldSendWebRTC: shouldSendWebRTC)
+            return
+        }
+        if shouldEncodeJpeg { encoding = true }
+        deliverStableFrame(
+            stableFrame,
+            timestamp: timestamp,
+            shouldSendWebRTC: shouldSendWebRTC,
+            shouldEncodeJpeg: shouldEncodeJpeg,
+            h264Request: h264Request
+        )
+    }
+
+    private func deliverStableFrame(
+        _ stableFrame: CVPixelBuffer,
+        timestamp: CMTime,
+        shouldSendWebRTC: Bool,
+        shouldEncodeJpeg: Bool,
+        h264Request: (forceKeyframe: Bool, token: UInt64)?
+    ) {
         if shouldSendWebRTC {
             webRTCPublisher.sendFrame(stableFrame, timestamp: timestamp)
         }
@@ -256,6 +305,23 @@ final class CaptureEngine {
                     self.finishH264Encode(token: h264Request.token)
                 }
                 self.scheduleH264EncodeTimeout(token: h264Request.token)
+            }
+        }
+    }
+
+    private func handleStableFrameFailure(
+        h264Request: (forceKeyframe: Bool, token: UInt64)?,
+        shouldSendWebRTC: Bool
+    ) {
+        if let h264Request {
+            streamLog("[stream:avcc] failed to prepare capture frame for H.264 token=\(h264Request.token)")
+            finishH264Encode(token: h264Request.token, restoreKeyframe: h264Request.forceKeyframe)
+        }
+        if shouldSendWebRTC {
+            webRTCCopyFailures += 1
+            recordWebRTCCopyFailure()
+            if streamShouldLog(webRTCCopyFailures) {
+                streamLog("[webrtc] failed to prepare capture frame for WebRTC")
             }
         }
     }
@@ -489,6 +555,7 @@ final class CaptureEngine {
             "msLast": statsScaleLastMs,
             "msAvg": statsScaleCount > 0 ? statsScaleTotalMs / Double(statsScaleCount) : 0.0,
             "msMax": statsScaleMaxMs,
+            "backpressureSkips": statsScaleBackpressureSkips,
         ]
         copyStats = [
             "frames": statsCopyCount,
@@ -549,6 +616,20 @@ final class CaptureEngine {
         statsLock.unlock()
     }
 
+    private func reserveScaledFramePreparation() -> Bool {
+        framePreparationLock.lock()
+        defer { framePreparationLock.unlock() }
+        if scaledFramePreparationPending { return false }
+        scaledFramePreparationPending = true
+        return true
+    }
+
+    private func finishScaledFramePreparation() {
+        framePreparationLock.lock()
+        scaledFramePreparationPending = false
+        framePreparationLock.unlock()
+    }
+
     private func recordCapturedFrame() {
         let nowNs = DispatchTime.now().uptimeNanoseconds
         withStatsLock {
@@ -574,6 +655,10 @@ final class CaptureEngine {
             statsScaleOutputWidth = outputWidth
             statsScaleOutputHeight = outputHeight
         }
+    }
+
+    private func recordScaleBackpressureSkip() {
+        withStatsLock { statsScaleBackpressureSkips += 1 }
     }
 
     private func recordCopiedFrame(width: Int, height: Int, durationMs: Double) {

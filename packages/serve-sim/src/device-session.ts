@@ -70,6 +70,7 @@ interface StreamStatsSample {
   captureFrames: number;
   copyFrames: number;
   scaleFrames: number;
+  scaleBackpressureSkips: number;
   mjpegReserved: number;
   webrtcReserved: number;
   webrtcDirect: number;
@@ -129,6 +130,7 @@ function streamStatsSample(native: unknown): StreamStatsSample {
     captureFrames: numberAt(native, ["capture", "frames"]),
     copyFrames: numberAt(native, ["copy", "frames"]),
     scaleFrames: numberAt(native, ["scale", "frames"]),
+    scaleBackpressureSkips: numberAt(native, ["scale", "backpressureSkips"]),
     mjpegReserved: numberAt(native, ["mjpeg", "reserved"]),
     webrtcReserved: numberAt(native, ["webrtc", "reserved"]),
     webrtcDirect: numberAt(native, ["webrtc", "direct"]),
@@ -588,6 +590,7 @@ export class DeviceSession {
       captureFps: perSecond(sample.captureFrames, previous.captureFrames, elapsedSeconds),
       copyFps: perSecond(sample.copyFrames, previous.copyFrames, elapsedSeconds),
       scaleFps: perSecond(sample.scaleFrames, previous.scaleFrames, elapsedSeconds),
+      scaleBackpressureSkips: sample.scaleBackpressureSkips - previous.scaleBackpressureSkips,
       mjpegReservedFps: perSecond(sample.mjpegReserved, previous.mjpegReserved, elapsedSeconds),
       webrtcReservedFps: perSecond(sample.webrtcReserved, previous.webrtcReserved, elapsedSeconds),
       webrtcDirectFps: perSecond(sample.webrtcDirect, previous.webrtcDirect, elapsedSeconds),
