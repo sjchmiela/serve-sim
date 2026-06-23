@@ -35,6 +35,7 @@ interface SimHIDHandle {
 interface SimCaptureHandle {
   start(): void;
   setAvccActive(active: boolean): void;
+  setMjpegActive(active: boolean): void;
   requestKeyframe(): void;
   updateStreamSettings(
     mjpegFps: number,
@@ -239,6 +240,11 @@ export class NativeCapture {
   /** Enable/disable H.264 encoding (forces an IDR on the next frame when enabled). */
   setAvccActive(active: boolean): void {
     this.handle.setAvccActive(active);
+  }
+
+  /** Enable/disable MJPEG encoding while HTTP MJPEG clients are attached. */
+  setMjpegActive(active: boolean): void {
+    this.handle.setMjpegActive(active);
   }
 
   /** Force the next H.264 frame to a keyframe (e.g. when a new AVCC viewer joins). */

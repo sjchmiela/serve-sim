@@ -51,6 +51,7 @@ final class CaptureEngine {
     private var encoding = false       // MJPEG backpressure
     private var h264Encoding = false   // H.264 backpressure
     private var forceKeyframe = false
+    private var mjpegActive = false
     private var avccActive = false
     private var h264FrameToken: UInt64 = 0
     private var h264ReservedCount: Int64 = 0
@@ -168,12 +169,19 @@ final class CaptureEngine {
         recordCapturedFrame()
         let encodeSize = encodedSize(width: w, height: h)
 
-        if !encoderReady || w != screenWidth || h != screenHeight || encodeSize.width != encodeWidth || encodeSize.height != encodeHeight {
+        let dimensionsChanged = w != screenWidth || h != screenHeight ||
+            encodeSize.width != encodeWidth || encodeSize.height != encodeHeight
+        if dimensionsChanged {
             screenWidth = w
             screenHeight = h
             encodeWidth = encodeSize.width
             encodeHeight = encodeSize.height
-            videoEncoder.stop()
+            if encoderReady {
+                videoEncoder.stop()
+                encoderReady = false
+            }
+        }
+        if mjpegActive && !encoderReady {
             videoEncoder.setup(width: Int32(encodeSize.width), height: Int32(encodeSize.height), fps: 60) { [weak self] jpeg in
                 self?.emit(codec: Self.codecMJPEG, data: jpeg, flags: 0)
             }
@@ -182,7 +190,7 @@ final class CaptureEngine {
 
         let h264Request = reserveH264EncodeIfNeeded()
         let shouldSendWebRTC = reserveWebRTCFrameIfNeeded()
-        let shouldEncodeJpeg = encoderReady && !encoding && reserveMjpegEncodeIfNeeded()
+        let shouldEncodeJpeg = mjpegActive && encoderReady && !encoding && reserveMjpegEncodeIfNeeded()
         if !shouldEncodeJpeg && h264Request == nil && !shouldSendWebRTC { return }
 
         guard let stableFrame = copyPixelBuffer(pixelBuffer, targetWidth: encodeSize.width, targetHeight: encodeSize.height) else {
@@ -454,6 +462,7 @@ final class CaptureEngine {
             "reserved": statsMjpegReserved,
             "reservedAvgFps": Double(statsMjpegReserved) / uptimeSec,
             "throttleSkips": statsMjpegThrottleSkips,
+            "active": mjpegActive,
         ]
         h264Stats = [
             "reserved": statsH264Reserved,
@@ -583,6 +592,19 @@ final class CaptureEngine {
                 streamLog("[stream:avcc] active=\(active) forceKeyframe=\(self.forceKeyframe)")
             }
             self.avccActive = active
+        }
+    }
+
+    func setMjpegActive(_ active: Bool) {
+        encodeQueue.async { [weak self] in
+            guard let self else { return }
+            if active != self.mjpegActive {
+                streamLog("[stream:mjpeg] active=\(active)")
+            }
+            self.mjpegActive = active
+            if active {
+                self.lastMjpegReservedAtNs = 0
+            }
         }
     }
 
