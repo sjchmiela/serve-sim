@@ -36,7 +36,7 @@ export const DEFAULT_STREAM_SETTINGS: ServeSimStreamSettings = {
   codec: "auto",
   streamFps: 60,
   streamQuality: 0.7,
-  streamMaxDimension: 0,
+  streamMaxDimension: 720,
   h264Bitrate: 6_000_000,
   h264MaxFps: 60,
   webrtcCodec: "h264",

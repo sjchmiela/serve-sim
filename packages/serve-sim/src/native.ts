@@ -11,6 +11,7 @@ import { createRequire } from "module";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
+import { DEFAULT_STREAM_SETTINGS } from "./state";
 
 const require = createRequire(import.meta.url);
 
@@ -220,16 +221,25 @@ export class NativeCapture {
     onWebRTCInput: (data: Buffer) => void = () => {},
     options: NativeCaptureOptions = {},
   ) {
-    this.handle = new (load().SimCapture)(udid, (codec, data, width, height, flags) => {
-      onFrame({
-        codec: codec === CODEC_AVCC ? "avcc" : "mjpeg",
-        data,
-        width,
-        height,
-        isDescription: (flags & FLAG_DESCRIPTION) !== 0,
-        isKeyframe: (flags & FLAG_KEYFRAME) !== 0,
-      });
-    }, onWebRTCInput, options.streamFps ?? 60, options.streamQuality ?? 0.7, options.h264MaxFps ?? 60, options.h264Bitrate ?? 6_000_000, options.streamMaxDimension ?? 0);
+    this.handle = new (load().SimCapture)(
+      udid,
+      (codec, data, width, height, flags) => {
+        onFrame({
+          codec: codec === CODEC_AVCC ? "avcc" : "mjpeg",
+          data,
+          width,
+          height,
+          isDescription: (flags & FLAG_DESCRIPTION) !== 0,
+          isKeyframe: (flags & FLAG_KEYFRAME) !== 0,
+        });
+      },
+      onWebRTCInput,
+      options.streamFps ?? DEFAULT_STREAM_SETTINGS.streamFps,
+      options.streamQuality ?? DEFAULT_STREAM_SETTINGS.streamQuality,
+      options.h264MaxFps ?? DEFAULT_STREAM_SETTINGS.h264MaxFps,
+      options.h264Bitrate ?? DEFAULT_STREAM_SETTINGS.h264Bitrate,
+      options.streamMaxDimension ?? DEFAULT_STREAM_SETTINGS.streamMaxDimension,
+    );
   }
 
   /** Begin capturing. Throws if the device isn't booted. */
@@ -254,11 +264,11 @@ export class NativeCapture {
 
   updateStreamSettings(options: NativeCaptureOptions): void {
     this.handle.updateStreamSettings(
-      options.streamFps ?? 60,
-      options.streamQuality ?? 0.7,
-      options.h264MaxFps ?? 60,
-      options.h264Bitrate ?? 6_000_000,
-      options.streamMaxDimension ?? 0,
+      options.streamFps ?? DEFAULT_STREAM_SETTINGS.streamFps,
+      options.streamQuality ?? DEFAULT_STREAM_SETTINGS.streamQuality,
+      options.h264MaxFps ?? DEFAULT_STREAM_SETTINGS.h264MaxFps,
+      options.h264Bitrate ?? DEFAULT_STREAM_SETTINGS.h264Bitrate,
+      options.streamMaxDimension ?? DEFAULT_STREAM_SETTINGS.streamMaxDimension,
     );
   }
 
