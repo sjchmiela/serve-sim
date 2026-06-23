@@ -25,7 +25,7 @@ final class WebRTCPublisher {
     var onInput: ((Data) -> Void)?
 
     private let queue = DispatchQueue(label: "webrtc-publisher")
-    private let factory = LKRTCPeerConnectionFactory()
+    private let factory: LKRTCPeerConnectionFactory
     private let videoSource: LKRTCVideoSource
     private let videoTrack: LKRTCVideoTrack
     private let capturer: LKRTCVideoCapturer
@@ -34,16 +34,26 @@ final class WebRTCPublisher {
     private var lastOutputHeight = 0
     private var sentFrameCount: Int64 = 0
     private var lastFrameTimestampNs: Int64 = 0
+    private var loggedInputFormat = false
     var isActive: Bool {
         queue.sync { session != nil }
     }
 
     init() {
+        let encoderFactory = LKRTCDefaultVideoEncoderFactory()
+        let decoderFactory = LKRTCDefaultVideoDecoderFactory()
+        factory = LKRTCPeerConnectionFactory(
+            encoderFactory: encoderFactory,
+            decoderFactory: decoderFactory
+        )
         videoSource = factory.videoSource(forScreenCast: true)
         videoTrack = factory.videoTrack(with: videoSource, trackId: "simulator-video")
         videoTrack.isEnabled = true
         capturer = LKRTCVideoCapturer(delegate: videoSource)
-        print("[webrtc] Publisher ready (factory + screen-cast video source)")
+        print(
+            "[webrtc] Publisher ready (default codec factory + screen-cast video source) " +
+            "senderCodecs=\(senderCodecSummary())"
+        )
     }
 
     func handleOffer(_ request: WebRTCOfferPayload) throws -> WebRTCAnswerPayload {
@@ -70,12 +80,20 @@ final class WebRTCPublisher {
                 self.videoSource.adaptOutputFormat(toWidth: Int32(width), height: Int32(height), fps: 30)
                 print("[webrtc] Video source output format: \(width)x\(height) @ 30fps")
             }
+            if !self.loggedInputFormat {
+                self.loggedInputFormat = true
+                let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+                let supported = LKRTCCVPixelBuffer.supportedPixelFormats()
+                    .contains(NSNumber(value: UInt32(pixelFormat)))
+                print("[webrtc] Input pixel format: \(pixelFormat) cvPixelBufferSupported=\(supported); forwarding as I420")
+            }
             let timeNs = self.nextFrameTimestampNs(timestamp)
-            let frame = LKRTCVideoFrame(
+            let cvFrame = LKRTCVideoFrame(
                 buffer: LKRTCCVPixelBuffer(pixelBuffer: pixelBuffer),
                 rotation: ._0,
                 timeStampNs: timeNs
             )
+            let frame = cvFrame.newI420()
             self.videoSource.capturer(self.capturer, didCapture: frame)
             self.sentFrameCount += 1
             if self.shouldLogFrame(self.sentFrameCount) {
@@ -412,6 +430,13 @@ final class WebRTCPublisher {
         let orderedCodecs = preferredCodecs + remainingCodecs
         transceiver.codecPreferences = orderedCodecs
         print("[webrtc] Preferred video codec: \(preferredName)")
+    }
+
+    private func senderCodecSummary() -> String {
+        let names = factory.rtpSenderCapabilities(forKind: "video").codecs.map { capability in
+            capability.mimeType.isEmpty ? capability.name : capability.mimeType
+        }
+        return names.joined(separator: ",")
     }
 
     private func makeError(_ message: String) -> Error {
