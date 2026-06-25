@@ -14,7 +14,11 @@
 // arch only, and cross-compiling per-arch with `--triple` breaks the
 // `#NodeModule` macro.
 
+import Foundation
 import PackageDescription
+
+let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
+let liveKitWebRTCFrameworkSearchPath = "\(packageRoot)/bin"
 
 let package = Package(
     name: "serve-sim-native",
@@ -40,11 +44,11 @@ let package = Package(
                 "build.sh",
             ],
             swiftSettings: [
-                .unsafeFlags(["-F", "bin"]),
+                .unsafeFlags(["-F", liveKitWebRTCFrameworkSearchPath]),
             ],
             linkerSettings: [
                 .unsafeFlags([
-                    "-F", "bin",
+                    "-F", liveKitWebRTCFrameworkSearchPath,
                     "-framework", "LiveKitWebRTC",
                     "-Xlinker", "-rpath",
                     "-Xlinker", "@loader_path/../bin",
