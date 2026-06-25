@@ -1,7 +1,9 @@
 import Foundation
+import Darwin
 import CoreVideo
 import CoreMedia
 import Accelerate
+import VideoToolbox
 import LiveKitWebRTC
 
 struct WebRTCIceServerPayload: Codable {
@@ -47,8 +49,10 @@ final class WebRTCPublisher {
     private var lastForwardedPixelFormat: OSType?
     private var lastFrameMode = "none"
     private var useNativePixelBufferFrames: Bool?
+    private var requestedCodecName = "H264"
     private var selectedCodecName = "H264"
     private let h264PixelBufferConverter = H264WebRTCPixelBufferConverter()
+    private let h264WebRTCSupport: WebRTCH264Support
     private var maxFps = 30
     private var targetBitrate = 6_000_000
     private var convertedFrameCount: Int64 = 0
@@ -61,6 +65,7 @@ final class WebRTCPublisher {
     }
 
     init() {
+        h264WebRTCSupport = Self.detectH264WebRTCSupport()
         let encoderFactory = LKRTCDefaultVideoEncoderFactory()
         let decoderFactory = LKRTCDefaultVideoDecoderFactory()
         factory = LKRTCPeerConnectionFactory(
@@ -71,9 +76,12 @@ final class WebRTCPublisher {
         videoTrack = factory.videoTrack(with: videoSource, trackId: "simulator-video")
         videoTrack.isEnabled = true
         capturer = LKRTCVideoCapturer(delegate: videoSource)
+        let h264Status = h264WebRTCSupport.allowed
+            ? "enabled(\(h264WebRTCSupport.probeSummary))"
+            : "disabled(\(h264WebRTCSupport.reason ?? "unsupported runtime"))"
         print(
             "[webrtc] Publisher ready (default codec factory + screen-cast video source) " +
-            "senderCodecs=\(senderCodecSummary())"
+            "h264=\(h264Status) senderCodecs=\(senderCodecSummary())"
         )
     }
 
@@ -135,7 +143,10 @@ final class WebRTCPublisher {
                 "active": session != nil,
                 "targetFps": maxFps,
                 "targetBitrate": targetBitrate,
+                "requestedCodec": requestedCodecName,
                 "selectedCodec": selectedCodecName,
+                "h264WebRTCEnabled": h264WebRTCSupport.allowed,
+                "h264WebRTCProbe": h264WebRTCSupport.probeSummary,
                 "frameMode": lastFrameMode,
                 "outputWidth": lastOutputWidth,
                 "outputHeight": lastOutputHeight,
@@ -158,6 +169,15 @@ final class WebRTCPublisher {
             }
             if let lastForwardedPixelFormat {
                 stats["forwardedPixelFormat"] = pixelFormatDescription(lastForwardedPixelFormat)
+            }
+            if let reason = h264WebRTCSupport.reason {
+                stats["h264WebRTCDisabledReason"] = reason
+            }
+            if let encoderID = h264WebRTCSupport.encoderID {
+                stats["h264VideoToolboxEncoderID"] = encoderID
+            }
+            if let usesHardware = h264WebRTCSupport.usesHardware {
+                stats["h264VideoToolboxUsesHardware"] = usesHardware
             }
             if let session {
                 stats["outboundRtp"] = session.delegate.outboundStatsSnapshot()
@@ -567,10 +587,22 @@ final class WebRTCPublisher {
     }
 
     private func applyVideoCodecPreference(_ codec: String?, to transceiver: LKRTCRtpTransceiver) {
-        let preferredName = Self.preferredVideoCodecName(codec)
+        let requestedName = Self.preferredVideoCodecName(codec)
+        requestedCodecName = requestedName
+        var preferredName = requestedName
+        if requestedName == "H264", !h264WebRTCSupport.allowed {
+            preferredName = "VP8"
+            print(
+                "[webrtc] H.264 requested but disabled (\(h264WebRTCSupport.reason ?? "unsupported runtime")); " +
+                "preferring VP8"
+            )
+        }
         selectedCodecName = preferredName
         let capabilities = factory.rtpSenderCapabilities(forKind: "video")
-        let preferredCodecs = capabilities.codecs.filter {
+        let usableCodecs = capabilities.codecs.filter { capability in
+            h264WebRTCSupport.allowed || !Self.codecCapability(capability, matches: "H264")
+        }
+        let preferredCodecs = usableCodecs.filter {
             $0.name.caseInsensitiveCompare(preferredName) == .orderedSame ||
                 $0.mimeType.caseInsensitiveCompare("video/\(preferredName)") == .orderedSame
         }
@@ -578,7 +610,7 @@ final class WebRTCPublisher {
             print("[webrtc] No sender codec capability found for \(preferredName); using default order")
             return
         }
-        let remainingCodecs = capabilities.codecs.filter { capability in
+        let remainingCodecs = usableCodecs.filter { capability in
             !preferredCodecs.contains { $0 === capability }
         }
         let orderedCodecs = preferredCodecs + remainingCodecs
@@ -650,10 +682,258 @@ final class WebRTCPublisher {
         }
     }
 
+    private static func codecCapability(_ capability: LKRTCRtpCodecCapability, matches name: String) -> Bool {
+        capability.name.caseInsensitiveCompare(name) == .orderedSame ||
+            capability.mimeType.caseInsensitiveCompare("video/\(name)") == .orderedSame
+    }
+
     private static func isBiPlanar420(_ pixelFormat: OSType) -> Bool {
         pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
             pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
     }
+
+    private static func detectH264WebRTCSupport() -> WebRTCH264Support {
+        let environment = ProcessInfo.processInfo.environment
+        if envFlagEnabled(environment["SERVE_SIM_DISABLE_WEBRTC_H264"]) {
+            return WebRTCH264Support(
+                allowed: false,
+                reason: "disabled by SERVE_SIM_DISABLE_WEBRTC_H264",
+                encoderID: nil,
+                usesHardware: nil,
+                probeSummary: "disabled by environment"
+            )
+        }
+        if envFlagEnabled(environment["SERVE_SIM_ALLOW_VM_H264_WEBRTC"]) ||
+            envFlagEnabled(environment["SERVE_SIM_FORCE_WEBRTC_H264"]) {
+            return WebRTCH264Support(
+                allowed: true,
+                reason: nil,
+                encoderID: nil,
+                usesHardware: nil,
+                probeSummary: "forced by environment"
+            )
+        }
+        let probe = probeVideoToolboxH264Encoder()
+        if probe.encodedFrame {
+            return WebRTCH264Support(
+                allowed: true,
+                reason: nil,
+                encoderID: probe.encoderID,
+                usesHardware: probe.usesHardware,
+                probeSummary: probe.summary
+            )
+        }
+        let modelPrefix = sysctlString("hw.model").map { " on \($0)" } ?? ""
+        return WebRTCH264Support(
+            allowed: false,
+            reason: "VideoToolbox H.264 probe failed\(modelPrefix): \(probe.summary)",
+            encoderID: probe.encoderID,
+            usesHardware: probe.usesHardware,
+            probeSummary: probe.summary
+        )
+    }
+
+    private static func probeVideoToolboxH264Encoder() -> H264VideoToolboxProbe {
+        let width: Int32 = 64
+        let height: Int32 = 64
+        let attrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelBufferWidthKey as String: Int(width),
+            kCVPixelBufferHeightKey as String: Int(height),
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+        ]
+        var session: VTCompressionSession?
+        let createStatus = VTCompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            width: width,
+            height: height,
+            codecType: kCMVideoCodecType_H264,
+            encoderSpecification: nil,
+            imageBufferAttributes: attrs as CFDictionary,
+            compressedDataAllocator: nil,
+            outputCallback: nil,
+            refcon: nil,
+            compressionSessionOut: &session
+        )
+        guard createStatus == noErr, let session else {
+            return H264VideoToolboxProbe(
+                encodedFrame: false,
+                encoderID: nil,
+                usesHardware: nil,
+                summary: "createStatus=\(createStatus)"
+            )
+        }
+        defer { VTCompressionSessionInvalidate(session) }
+
+        _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
+        _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        _ = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: NSNumber(value: 30))
+
+        let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(session)
+        let encoderID = vtSessionStringProperty(session, key: kVTCompressionPropertyKey_EncoderID)
+        let usesHardware = inferredHardwareAcceleration(
+            encoderID: encoderID,
+            reported: vtSessionBoolProperty(session, key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder)
+        )
+        guard prepareStatus == noErr else {
+            return H264VideoToolboxProbe(
+                encodedFrame: false,
+                encoderID: encoderID,
+                usesHardware: usesHardware,
+                summary: "encoderID=\(encoderID ?? "unknown") prepareStatus=\(prepareStatus)"
+            )
+        }
+
+        guard let pixelBuffer = makeH264ProbePixelBuffer(width: Int(width), height: Int(height)) else {
+            return H264VideoToolboxProbe(
+                encodedFrame: false,
+                encoderID: encoderID,
+                usesHardware: usesHardware,
+                summary: "encoderID=\(encoderID ?? "unknown") pixelBufferAllocationFailed"
+            )
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        var callbackStatus: OSStatus?
+        var producedSample = false
+        let encodeStatus = VTCompressionSessionEncodeFrame(
+            session,
+            imageBuffer: pixelBuffer,
+            presentationTimeStamp: CMTime(value: 0, timescale: 30),
+            duration: CMTime(value: 1, timescale: 30),
+            frameProperties: nil,
+            infoFlagsOut: nil
+        ) { status, _, sampleBuffer in
+            callbackStatus = status
+            producedSample = status == noErr && sampleBuffer.map(CMSampleBufferDataIsReady) == true
+            semaphore.signal()
+        }
+        let completeStatus = VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        let completed = semaphore.wait(timeout: .now() + .milliseconds(750)) == .success
+        let encodedFrame = encodeStatus == noErr &&
+            completeStatus == noErr &&
+            completed &&
+            callbackStatus == noErr &&
+            producedSample
+        let hardwareSummary = usesHardware.map { "hardware=\($0)" } ?? "hardware=unknown"
+        return H264VideoToolboxProbe(
+            encodedFrame: encodedFrame,
+            encoderID: encoderID,
+            usesHardware: usesHardware,
+            summary: "encoderID=\(encoderID ?? "unknown") \(hardwareSummary) " +
+                "encodeStatus=\(encodeStatus) completeStatus=\(completeStatus) " +
+                "callbackStatus=\(callbackStatus.map(String.init) ?? "missing") " +
+                "sample=\(producedSample)"
+        )
+    }
+
+    private static func makeH264ProbePixelBuffer(width: Int, height: Int) -> CVPixelBuffer? {
+        let attrs: [String: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+        ]
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            attrs as CFDictionary,
+            &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pixelBuffer else { return nil }
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+        guard
+            let yAddress = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0),
+            let cbCrAddress = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1)
+        else {
+            return nil
+        }
+        let yStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        let cbCrStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
+        let yPointer = yAddress.assumingMemoryBound(to: UInt8.self)
+        let cbCrPointer = cbCrAddress.assumingMemoryBound(to: UInt8.self)
+        for row in 0..<height {
+            let rowPointer = yPointer.advanced(by: row * yStride)
+            for column in 0..<width {
+                rowPointer[column] = UInt8((row + column) & 0xff)
+            }
+        }
+        for row in 0..<(height / 2) {
+            let rowPointer = cbCrPointer.advanced(by: row * cbCrStride)
+            for column in stride(from: 0, to: width, by: 2) {
+                rowPointer[column] = 128
+                rowPointer[column + 1] = 128
+            }
+        }
+        return pixelBuffer
+    }
+
+    private static func vtSessionStringProperty(_ session: VTCompressionSession, key: CFString) -> String? {
+        var value: CFTypeRef?
+        let status = withUnsafeMutablePointer(to: &value) { pointer in
+            VTSessionCopyProperty(session, key: key, allocator: kCFAllocatorDefault, valueOut: pointer)
+        }
+        guard status == noErr, let value else { return nil }
+        return String(describing: value)
+    }
+
+    private static func vtSessionBoolProperty(_ session: VTCompressionSession, key: CFString) -> Bool? {
+        var value: CFTypeRef?
+        let status = withUnsafeMutablePointer(to: &value) { pointer in
+            VTSessionCopyProperty(session, key: key, allocator: kCFAllocatorDefault, valueOut: pointer)
+        }
+        guard status == noErr, let value else { return nil }
+        if CFGetTypeID(value) == CFBooleanGetTypeID() {
+            return CFBooleanGetValue((value as! CFBoolean))
+        }
+        return (value as? NSNumber)?.boolValue
+    }
+
+    private static func inferredHardwareAcceleration(encoderID: String?, reported: Bool?) -> Bool? {
+        if let reported { return reported }
+        guard let encoderID else { return nil }
+        let normalized = encoderID.lowercased()
+        if normalized.contains("paravirtualized") || normalized.contains(".ave.") {
+            return true
+        }
+        if normalized.contains("com.apple.videotoolbox.videoencoder.h264") {
+            return false
+        }
+        return nil
+    }
+
+    private static func envFlagEnabled(_ value: String?) -> Bool {
+        switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func sysctlString(_ name: String) -> String? {
+        var size = 0
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 1 else { return nil }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(name, &buffer, &size, nil, 0) == 0 else { return nil }
+        return String(cString: buffer)
+    }
+}
+
+private struct WebRTCH264Support {
+    let allowed: Bool
+    let reason: String?
+    let encoderID: String?
+    let usesHardware: Bool?
+    let probeSummary: String
+}
+
+private struct H264VideoToolboxProbe {
+    let encodedFrame: Bool
+    let encoderID: String?
+    let usesHardware: Bool?
+    let summary: String
 }
 
 private final class H264WebRTCPixelBufferConverter {

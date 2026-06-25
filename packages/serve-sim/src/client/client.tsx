@@ -71,6 +71,10 @@ import {
 import { proxyPreviewConfigForBrowser } from "./utils/preview-config";
 import { mjpegStreamUrlFrom, simEndpoint, streamConfigFrom } from "./utils/sim-endpoint";
 import {
+  nextWebRtcFallbackCodec,
+  type WebRtcCodec,
+} from "./webrtc-codec-fallback";
+import {
   SIMULATOR_RESIZE_DRAG_TRANSITION,
   SIMULATOR_RESIZE_LAYOUT_TRANSITION,
   SIMULATOR_RESIZE_PAGE_TRANSITION,
@@ -398,6 +402,7 @@ function App() {
         starting={starting}
         shuttingDown={shuttingDown}
         onShutdown={shutdownDevice}
+        onRefresh={refreshGrid}
       />
       <ResizeHandle
         panelWidth={gridPanelWidth}
@@ -530,14 +535,17 @@ function AppWithConfig({
   // drop to MJPEG, which every helper serves. See avcc-fallback.ts.
   const avcc = useAvccStream();
   const [webRtcFallback, setWebRtcFallback] = useState(false);
+  const [webRtcCodecOverride, setWebRtcCodecOverride] = useState<WebRtcCodec | null>(null);
   const wantsWebRtcVideo = streamSettings.transport === "webrtc";
   const useWebRtcVideo = wantsWebRtcVideo && !webRtcFallback;
+  const effectiveWebRtcCodec = webRtcCodecOverride ?? streamSettings.webrtcCodec;
   const webrtc = useWebRtcStream({
     url: config.url,
     enabled: useWebRtcVideo,
-    codec: streamSettings.webrtcCodec,
+    codec: effectiveWebRtcCodec,
     iceServers: config.webrtcIceServers,
   });
+  const activeWebRtcCodec = webrtc.negotiatedCodec ?? effectiveWebRtcCodec;
   const [avccFallback, dispatchAvccFallback] = useReducer(
     avccFallbackReducer,
     initialAvccFallback,
@@ -564,6 +572,7 @@ function AppWithConfig({
     setStreaming(false);
     dispatchAvccFallback("reset");
     setWebRtcFallback(false);
+    setWebRtcCodecOverride(null);
   }, [
     config.streamUrl,
     config.url,
@@ -573,19 +582,40 @@ function AppWithConfig({
     setStreaming,
   ]);
   // WebRTC is the lowest-latency path, but a failed negotiation should not
-  // leave the simulator blank. If no decoded frame arrives in the startup
-  // window, fall back to MJPEG for the current stream.
+  // leave the simulator blank. If H.264 negotiates but produces no media on a
+  // VM, retry WebRTC with VP8 before falling back to MJPEG.
   useEffect(() => {
     if (!useWebRtcVideo) return;
-    if (webrtc.error) {
+    const failOverWebRtc = (reason: string) => {
+      const nextCodec = nextWebRtcFallbackCodec(streamSettings.webrtcCodec, effectiveWebRtcCodec);
+      if (nextCodec) {
+        console.warn(
+          `[serve-sim] WebRTC ${effectiveWebRtcCodec.toUpperCase()} produced no frames (${reason}); ` +
+            `retrying ${nextCodec.toUpperCase()}`
+        );
+        setStreaming(false);
+        setWebRtcCodecOverride(nextCodec);
+        return;
+      }
       setWebRtcFallback(true);
+    };
+    if (webrtc.error) {
+      failOverWebRtc(webrtc.error);
       return;
     }
     const timer = setTimeout(() => {
-      if (!streaming) setWebRtcFallback(true);
+      if (!streaming) failOverWebRtc("startup timeout");
     }, WEBRTC_FRAME_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [useWebRtcVideo, webrtc.error, streaming, config.streamUrl, streamSettings.webrtcCodec]);
+  }, [
+    useWebRtcVideo,
+    webrtc.error,
+    streaming,
+    config.streamUrl,
+    streamSettings.webrtcCodec,
+    effectiveWebRtcCodec,
+    setStreaming,
+  ]);
   // `streaming` flips true on the first painted AVCC frame (JPEG seed decodes
   // sub-second on a healthy helper), which cancels the fallback.
   useEffect(() => {
@@ -1255,7 +1285,7 @@ function AppWithConfig({
         onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
         streamSettings={streamSettings}
         onStreamSettingsChange={patchStreamSettings}
-        activeCodec={useWebRtcVideo ? "webrtc" : useAvccVideo ? "h264" : "mjpeg"}
+        activeCodec={useWebRtcVideo ? `webrtc/${activeWebRtcCodec}` : useAvccVideo ? "h264" : "mjpeg"}
         streamSettingsPending={streamSettingsPending}
         width={toolsPanelWidth}
       />

@@ -280,7 +280,6 @@ export function SimulatorView({
       video.addEventListener("canplay", markPlayableFrame);
       video.addEventListener("playing", markPlayableFrame);
       video.srcObject = webRtcStream;
-      setConnected(true);
       markPlayableFrame();
       readinessPoll = setInterval(markPlayableFrame, 100);
       startupWatchdog = setTimeout(() => {

@@ -1,4 +1,8 @@
 import { useEffect, useState } from "react";
+import {
+  negotiatedWebRtcCodecFromSdp,
+  type WebRtcCodec,
+} from "../webrtc-codec-fallback";
 
 type IceServer = {
   urls: string[];
@@ -6,7 +10,10 @@ type IceServer = {
   credential?: string;
 };
 
-type WebRtcCodec = "vp8" | "vp9" | "h264";
+type WebRtcError = {
+  codec: WebRtcCodec;
+  message: string;
+};
 
 const DEFAULT_ICE_SERVERS: IceServer[] = [
   { urls: ["stun:stun.l.google.com:19302"] },
@@ -39,14 +46,16 @@ export function useWebRtcStream({
 }) {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [connected, setConnected] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<WebRtcError | null>(null);
+  const [negotiatedCodec, setNegotiatedCodec] = useState<WebRtcCodec | null>(null);
 
   useEffect(() => {
     if (!enabled || !url) return;
     if (typeof RTCPeerConnection === "undefined" || typeof RTCRtpReceiver === "undefined") {
       setStream(null);
       setConnected(false);
-      setError("WebRTC is not supported in this browser");
+      setNegotiatedCodec(null);
+      setError({ codec, message: "WebRTC is not supported in this browser" });
       return;
     }
 
@@ -58,6 +67,7 @@ export function useWebRtcStream({
     const servers = iceServers?.length ? iceServers : DEFAULT_ICE_SERVERS;
     setStream(null);
     setConnected(false);
+    setNegotiatedCodec(null);
     setError(null);
 
     const waitForIce = (connection: RTCPeerConnection) =>
@@ -117,7 +127,9 @@ export function useWebRtcStream({
         pc.onconnectionstatechange = () => {
           if (stopped || !pc) return;
           setConnected(pc.connectionState === "connected");
-          if (pc.connectionState === "failed") setError("WebRTC connection failed");
+          if (pc.connectionState === "failed") {
+            setError({ codec, message: "WebRTC connection failed" });
+          }
         };
 
         const offer = await pc.createOffer();
@@ -151,10 +163,17 @@ export function useWebRtcStream({
         }
         if (!response.ok) throw new Error(`WebRTC offer failed: HTTP ${response.status}`);
         const answer = await response.json() as RTCSessionDescriptionInit;
+        if (stopped) return;
+        if (typeof answer.sdp === "string") {
+          setNegotiatedCodec(negotiatedWebRtcCodecFromSdp(answer.sdp));
+        }
         await pc.setRemoteDescription(answer);
       } catch (err) {
         if (!stopped) {
-          setError(offerTimedOut ? "WebRTC offer timed out" : err instanceof Error ? err.message : String(err));
+          setError({
+            codec,
+            message: offerTimedOut ? "WebRTC offer timed out" : err instanceof Error ? err.message : String(err),
+          });
           setConnected(false);
         }
       }
@@ -166,9 +185,10 @@ export function useWebRtcStream({
       offerController?.abort();
       setStream(null);
       setConnected(false);
+      setNegotiatedCodec(null);
       pc?.close();
     };
   }, [enabled, url, codec, iceServers]);
 
-  return { stream, connected, error };
+  return { stream, connected, negotiatedCodec, error: error?.codec === codec ? error.message : null };
 }

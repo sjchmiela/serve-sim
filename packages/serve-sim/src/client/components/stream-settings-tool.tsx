@@ -71,7 +71,7 @@ export function StreamSettingsTool({
 }: {
   settings: StreamSettings;
   onSettingsChange: (patch: Partial<StreamSettings>) => void;
-  activeCodec: "webrtc" | "h264" | "mjpeg";
+  activeCodec: string;
   disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
