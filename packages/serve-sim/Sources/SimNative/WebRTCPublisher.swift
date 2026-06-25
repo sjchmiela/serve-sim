@@ -1,6 +1,7 @@
 import Foundation
 import CoreVideo
 import CoreMedia
+import Accelerate
 import LiveKitWebRTC
 
 struct WebRTCIceServerPayload: Codable {
@@ -43,9 +44,18 @@ final class WebRTCPublisher {
     private var lastI420Ms = 0.0
     private var maxI420Ms = 0.0
     private var lastInputPixelFormat: OSType?
+    private var lastForwardedPixelFormat: OSType?
+    private var lastFrameMode = "none"
     private var useNativePixelBufferFrames: Bool?
+    private var selectedCodecName = "H264"
+    private let h264PixelBufferConverter = H264WebRTCPixelBufferConverter()
     private var maxFps = 30
     private var targetBitrate = 6_000_000
+    private var convertedFrameCount: Int64 = 0
+    private var conversionFailureCount: Int64 = 0
+    private var totalConversionMs = 0.0
+    private var lastConversionMs = 0.0
+    private var maxConversionMs = 0.0
     var isActive: Bool {
         queue.sync { session != nil }
     }
@@ -125,6 +135,8 @@ final class WebRTCPublisher {
                 "active": session != nil,
                 "targetFps": maxFps,
                 "targetBitrate": targetBitrate,
+                "selectedCodec": selectedCodecName,
+                "frameMode": lastFrameMode,
                 "outputWidth": lastOutputWidth,
                 "outputHeight": lastOutputHeight,
                 "sentFrames": sentFrameCount,
@@ -132,10 +144,21 @@ final class WebRTCPublisher {
                 "directInputFrames": directInputFrameCount,
                 "avgSentFps": Double(sentFrameCount) / uptimeSec,
                 "lastFrameAgeMs": lastFrameAgeMs,
+                "convertedFrames": convertedFrameCount,
+                "conversionFailures": conversionFailureCount,
+                "conversionMsLast": lastConversionMs,
+                "conversionMsAvg": convertedFrameCount > 0 ? totalConversionMs / Double(convertedFrameCount) : 0.0,
+                "conversionMsMax": maxConversionMs,
                 "i420MsLast": lastI420Ms,
                 "i420MsAvg": sentFrameCount > 0 ? totalI420Ms / Double(sentFrameCount) : 0.0,
                 "i420MsMax": maxI420Ms,
             ]
+            if let lastInputPixelFormat {
+                stats["inputPixelFormat"] = pixelFormatDescription(lastInputPixelFormat)
+            }
+            if let lastForwardedPixelFormat {
+                stats["forwardedPixelFormat"] = pixelFormatDescription(lastForwardedPixelFormat)
+            }
             if let session {
                 stats["outboundRtp"] = session.delegate.outboundStatsSnapshot()
             }
@@ -176,31 +199,67 @@ final class WebRTCPublisher {
             print("[webrtc] Input pixel format: \(pixelFormat) cvPixelBufferSupported=\(supported); forwarding as \(frameMode)")
         }
         let timeNs = nextFrameTimestampNs(timestamp)
-        let cvFrame = LKRTCVideoFrame(
+        let sourceFrame = LKRTCVideoFrame(
             buffer: LKRTCCVPixelBuffer(pixelBuffer: pixelBuffer),
             rotation: ._0,
             timeStampNs: timeNs
         )
         var convertDurationMs = 0.0
-        let usedNativeFrame = useNativePixelBufferFrames ?? false
-        if usedNativeFrame {
-            videoSource.capturer(capturer, didCapture: cvFrame)
-        } else {
+        var usedFrame = sourceFrame
+        var usedNativeFrame = useNativePixelBufferFrames ?? false
+        var forwardedPixelFormat = pixelFormat
+        var frameMode = usedNativeFrame ? "native" : "i420"
+
+        if selectedCodecName == "H264" {
+            if Self.isBiPlanar420(pixelFormat) {
+                usedNativeFrame = true
+                frameMode = "nv12-input"
+            } else if let converted = h264PixelBufferConverter.convert(pixelBuffer) {
+                convertDurationMs = h264PixelBufferConverter.lastDurationMs
+                forwardedPixelFormat = CVPixelBufferGetPixelFormatType(converted)
+                usedFrame = LKRTCVideoFrame(
+                    buffer: LKRTCCVPixelBuffer(pixelBuffer: converted),
+                    rotation: ._0,
+                    timeStampNs: timeNs
+                )
+                usedNativeFrame = true
+                frameMode = "nv12"
+            } else {
+                conversionFailureCount += 1
+                let convertStartNs = DispatchTime.now().uptimeNanoseconds
+                usedFrame = sourceFrame.newI420()
+                convertDurationMs = Double(DispatchTime.now().uptimeNanoseconds - convertStartNs) / 1_000_000.0
+                usedNativeFrame = false
+                frameMode = "i420-fallback"
+            }
+        } else if !usedNativeFrame {
             let convertStartNs = DispatchTime.now().uptimeNanoseconds
-            let frame = cvFrame.newI420()
-            videoSource.capturer(capturer, didCapture: frame)
+            usedFrame = sourceFrame.newI420()
             convertDurationMs = Double(DispatchTime.now().uptimeNanoseconds - convertStartNs) / 1_000_000.0
+            frameMode = "i420-fallback"
+        }
+
+        videoSource.capturer(capturer, didCapture: usedFrame)
+        if convertDurationMs > 0 {
+            convertedFrameCount += 1
+            totalConversionMs += convertDurationMs
+            maxConversionMs = max(maxConversionMs, convertDurationMs)
         }
         sentFrameCount += 1
         lastFrameSentAtNs = DispatchTime.now().uptimeNanoseconds
-        lastI420Ms = convertDurationMs
-        totalI420Ms += convertDurationMs
-        maxI420Ms = max(maxI420Ms, convertDurationMs)
+        lastForwardedPixelFormat = forwardedPixelFormat
+        lastFrameMode = frameMode
+        lastConversionMs = convertDurationMs
+        lastI420Ms = frameMode == "i420-fallback" ? convertDurationMs : 0.0
+        totalI420Ms += lastI420Ms
+        maxI420Ms = max(maxI420Ms, lastI420Ms)
         if shouldLogFrame(sentFrameCount) {
             print(
-                "[webrtc] Sent video frame #\(sentFrameCount) mode=\(mode) size=\(width)x\(height) " +
-                "timestampNs=\(timeNs) frameMode=\(usedNativeFrame ? "native" : "i420") " +
-                "i420Ms=\(String(format: "%.2f", convertDurationMs))"
+                "[webrtc] Sent video frame #\(sentFrameCount) mode=\(mode) codec=\(selectedCodecName) " +
+                "size=\(width)x\(height) timestampNs=\(timeNs) frameMode=\(frameMode) " +
+                "inputFormat=\(pixelFormatDescription(pixelFormat)) " +
+                "forwardedFormat=\(pixelFormatDescription(forwardedPixelFormat)) " +
+                "native=\(usedNativeFrame) conversionMs=\(String(format: "%.2f", convertDurationMs))"
             )
         }
     }
@@ -508,15 +567,8 @@ final class WebRTCPublisher {
     }
 
     private func applyVideoCodecPreference(_ codec: String?, to transceiver: LKRTCRtpTransceiver) {
-        let preferredName: String
-        switch codec?.lowercased() {
-        case "vp8":
-            preferredName = "VP8"
-        case "vp9":
-            preferredName = "VP9"
-        default:
-            preferredName = "H264"
-        }
+        let preferredName = Self.preferredVideoCodecName(codec)
+        selectedCodecName = preferredName
         let capabilities = factory.rtpSenderCapabilities(forKind: "video")
         let preferredCodecs = capabilities.codecs.filter {
             $0.name.caseInsensitiveCompare(preferredName) == .orderedSame ||
@@ -586,6 +638,186 @@ final class WebRTCPublisher {
     private func shouldLogFrame(_ count: Int64) -> Bool {
         count <= 5 || count % 120 == 0
     }
+
+    private static func preferredVideoCodecName(_ codec: String?) -> String {
+        switch codec?.lowercased() {
+        case "vp8":
+            return "VP8"
+        case "vp9":
+            return "VP9"
+        default:
+            return "H264"
+        }
+    }
+
+    private static func isBiPlanar420(_ pixelFormat: OSType) -> Bool {
+        pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+            pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    }
+}
+
+private final class H264WebRTCPixelBufferConverter {
+    private var pool: CVPixelBufferPool?
+    private var width = 0
+    private var height = 0
+    private var conversionInfo = vImage_ARGBToYpCbCr()
+    private var conversionReady = false
+    private(set) var lastDurationMs = 0.0
+
+    init() {
+        var pixelRange = vImage_YpCbCrPixelRange(
+            Yp_bias: 0,
+            CbCr_bias: 128,
+            YpRangeMax: 255,
+            CbCrRangeMax: 255,
+            YpMax: 255,
+            YpMin: 1,
+            CbCrMax: 255,
+            CbCrMin: 0
+        )
+        let status = vImageConvert_ARGBToYpCbCr_GenerateConversion(
+            kvImage_ARGBToYpCbCrMatrix_ITU_R_709_2,
+            &pixelRange,
+            &conversionInfo,
+            kvImageARGB8888,
+            kvImage420Yp8_CbCr8,
+            vImage_Flags(kvImageNoFlags)
+        )
+        conversionReady = status == kvImageNoError
+        if !conversionReady {
+            streamLog("[webrtc] H.264 NV12 conversion setup failed status=\(status)")
+        }
+    }
+
+    func convert(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+        guard conversionReady else { return nil }
+        let sourceFormat = CVPixelBufferGetPixelFormatType(source)
+        guard sourceFormat == kCVPixelFormatType_32BGRA else {
+            streamLog("[webrtc] H.264 NV12 conversion unsupported input format=\(pixelFormatDescription(sourceFormat))")
+            return nil
+        }
+        let sourceWidth = CVPixelBufferGetWidth(source)
+        let sourceHeight = CVPixelBufferGetHeight(source)
+        guard sourceWidth > 1, sourceHeight > 1 else { return nil }
+        guard let output = makePixelBuffer(width: sourceWidth, height: sourceHeight) else { return nil }
+
+        CVPixelBufferLockBaseAddress(source, .readOnly)
+        CVPixelBufferLockBaseAddress(output, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(output, [])
+            CVPixelBufferUnlockBaseAddress(source, .readOnly)
+        }
+        guard
+            let sourceAddress = CVPixelBufferGetBaseAddress(source),
+            CVPixelBufferGetPlaneCount(output) >= 2,
+            let yAddress = CVPixelBufferGetBaseAddressOfPlane(output, 0),
+            let cbCrAddress = CVPixelBufferGetBaseAddressOfPlane(output, 1)
+        else {
+            return nil
+        }
+
+        var sourceBuffer = vImage_Buffer(
+            data: sourceAddress,
+            height: vImagePixelCount(sourceHeight),
+            width: vImagePixelCount(sourceWidth),
+            rowBytes: CVPixelBufferGetBytesPerRow(source)
+        )
+        var yBuffer = vImage_Buffer(
+            data: yAddress,
+            height: vImagePixelCount(CVPixelBufferGetHeightOfPlane(output, 0)),
+            width: vImagePixelCount(CVPixelBufferGetWidthOfPlane(output, 0)),
+            rowBytes: CVPixelBufferGetBytesPerRowOfPlane(output, 0)
+        )
+        var cbCrBuffer = vImage_Buffer(
+            data: cbCrAddress,
+            height: vImagePixelCount(CVPixelBufferGetHeightOfPlane(output, 1)),
+            width: vImagePixelCount(CVPixelBufferGetWidthOfPlane(output, 1)),
+            rowBytes: CVPixelBufferGetBytesPerRowOfPlane(output, 1)
+        )
+        var bgraPermuteMap: [UInt8] = [3, 2, 1, 0]
+        let startNs = DispatchTime.now().uptimeNanoseconds
+        let status = vImageConvert_ARGB8888To420Yp8_CbCr8(
+            &sourceBuffer,
+            &yBuffer,
+            &cbCrBuffer,
+            &conversionInfo,
+            &bgraPermuteMap,
+            vImage_Flags(kvImageNoFlags)
+        )
+        lastDurationMs = Double(DispatchTime.now().uptimeNanoseconds - startNs) / 1_000_000.0
+        guard status == kvImageNoError else {
+            streamLog("[webrtc] H.264 NV12 conversion failed status=\(status)")
+            return nil
+        }
+        attachColorMetadata(to: output)
+        return output
+    }
+
+    private func makePixelBuffer(width nextWidth: Int, height nextHeight: Int) -> CVPixelBuffer? {
+        if pool == nil || width != nextWidth || height != nextHeight {
+            width = nextWidth
+            height = nextHeight
+            let attrs: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                kCVPixelBufferWidthKey as String: nextWidth,
+                kCVPixelBufferHeightKey as String: nextHeight,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+            ]
+            var newPool: CVPixelBufferPool?
+            let status = CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attrs as CFDictionary, &newPool)
+            guard status == kCVReturnSuccess, let newPool else {
+                streamLog("[webrtc] H.264 NV12 pixel buffer pool create failed status=\(status) size=\(nextWidth)x\(nextHeight)")
+                pool = nil
+                return nil
+            }
+            pool = newPool
+            streamLog("[webrtc] H.264 NV12 pixel buffer pool ready size=\(nextWidth)x\(nextHeight)")
+        }
+        guard let pool else { return nil }
+        var output: CVPixelBuffer?
+        let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &output)
+        guard status == kCVReturnSuccess, let output else {
+            streamLog("[webrtc] H.264 NV12 pixel buffer allocation failed status=\(status)")
+            return nil
+        }
+        return output
+    }
+
+    private func attachColorMetadata(to pixelBuffer: CVPixelBuffer) {
+        CVBufferSetAttachment(
+            pixelBuffer,
+            kCVImageBufferYCbCrMatrixKey,
+            kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            .shouldPropagate
+        )
+        CVBufferSetAttachment(
+            pixelBuffer,
+            kCVImageBufferColorPrimariesKey,
+            kCVImageBufferColorPrimaries_ITU_R_709_2,
+            .shouldPropagate
+        )
+        CVBufferSetAttachment(
+            pixelBuffer,
+            kCVImageBufferTransferFunctionKey,
+            kCVImageBufferTransferFunction_sRGB,
+            .shouldPropagate
+        )
+    }
+}
+
+private func pixelFormatDescription(_ pixelFormat: OSType) -> String {
+    var value = pixelFormat.bigEndian
+    let text = withUnsafeBytes(of: &value) { rawBuffer -> String in
+        let bytes = rawBuffer.map { byte -> UInt8 in
+            if byte >= 32 && byte <= 126 {
+                return byte
+            }
+            return UInt8(ascii: ".")
+        }
+        return String(bytes: bytes, encoding: .ascii) ?? "\(pixelFormat)"
+    }
+    return "\(text)(\(pixelFormat))"
 }
 
 private final class WebRTCSession {
