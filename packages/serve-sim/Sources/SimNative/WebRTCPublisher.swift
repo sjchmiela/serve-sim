@@ -42,7 +42,8 @@ final class WebRTCPublisher {
     private var totalI420Ms = 0.0
     private var lastI420Ms = 0.0
     private var maxI420Ms = 0.0
-    private var loggedInputFormat = false
+    private var lastInputPixelFormat: OSType?
+    private var useNativePixelBufferFrames: Bool?
     private var maxFps = 30
     private var targetBitrate = 6_000_000
     var isActive: Bool {
@@ -165,12 +166,14 @@ final class WebRTCPublisher {
             )
             print("[webrtc] Video source output format: \(width)x\(height) @ \(maxFps)fps")
         }
-        if !loggedInputFormat {
-            loggedInputFormat = true
-            let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        if lastInputPixelFormat != pixelFormat {
+            lastInputPixelFormat = pixelFormat
             let supported = LKRTCCVPixelBuffer.supportedPixelFormats()
                 .contains(NSNumber(value: UInt32(pixelFormat)))
-            print("[webrtc] Input pixel format: \(pixelFormat) cvPixelBufferSupported=\(supported); forwarding as I420")
+            useNativePixelBufferFrames = supported
+            let frameMode = supported ? "native CVPixelBuffer" : "I420 fallback"
+            print("[webrtc] Input pixel format: \(pixelFormat) cvPixelBufferSupported=\(supported); forwarding as \(frameMode)")
         }
         let timeNs = nextFrameTimestampNs(timestamp)
         let cvFrame = LKRTCVideoFrame(
@@ -178,10 +181,16 @@ final class WebRTCPublisher {
             rotation: ._0,
             timeStampNs: timeNs
         )
-        let convertStartNs = DispatchTime.now().uptimeNanoseconds
-        let frame = cvFrame.newI420()
-        videoSource.capturer(capturer, didCapture: frame)
-        let convertDurationMs = Double(DispatchTime.now().uptimeNanoseconds - convertStartNs) / 1_000_000.0
+        var convertDurationMs = 0.0
+        let usedNativeFrame = useNativePixelBufferFrames ?? false
+        if usedNativeFrame {
+            videoSource.capturer(capturer, didCapture: cvFrame)
+        } else {
+            let convertStartNs = DispatchTime.now().uptimeNanoseconds
+            let frame = cvFrame.newI420()
+            videoSource.capturer(capturer, didCapture: frame)
+            convertDurationMs = Double(DispatchTime.now().uptimeNanoseconds - convertStartNs) / 1_000_000.0
+        }
         sentFrameCount += 1
         lastFrameSentAtNs = DispatchTime.now().uptimeNanoseconds
         lastI420Ms = convertDurationMs
@@ -190,7 +199,8 @@ final class WebRTCPublisher {
         if shouldLogFrame(sentFrameCount) {
             print(
                 "[webrtc] Sent video frame #\(sentFrameCount) mode=\(mode) size=\(width)x\(height) " +
-                "timestampNs=\(timeNs) i420Ms=\(String(format: "%.2f", convertDurationMs))"
+                "timestampNs=\(timeNs) frameMode=\(usedNativeFrame ? "native" : "i420") " +
+                "i420Ms=\(String(format: "%.2f", convertDurationMs))"
             )
         }
     }
